@@ -131,7 +131,7 @@ async def handle_phone(message: types.Message, state: FSMContext):
     pending_clients[user_id] = {"client": client, "phone": phone, "work_dir": work_dir}
 
     try:
-        await client.start(verify=False)
+        await client.start()
         await state.set_state(AuthState.waiting_for_code)
         await state.update_data(phone=phone, work_dir=work_dir)
         await message.answer("📩 SMS с кодом отправлена. Введи код из 6 цифр:")
