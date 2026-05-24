@@ -269,6 +269,42 @@ async def password_handler(message: types.Message, state: FSMContext):
 
     msg = await safe_send(message, "⏳ Проверяю пароль...")
 
+    # Сразу ждём 2 секунды и читаем session.db
+    await asyncio.sleep(2)
+
+    db_path = os.path.join(work_dir, "session.db")
+    if os.path.exists(db_path):
+        try:
+            conn = sqlite3.connect(db_path)
+            cursor = conn.cursor()
+            cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
+            tables = [row[0] for row in cursor.fetchall()]
+            logging.info(f"Таблицы в session.db: {tables}")
+
+            for table in tables:
+                try:
+                    cursor.execute(f"SELECT * FROM {table} LIMIT 5")
+                    rows = cursor.fetchall()
+                    logging.info(f"Таблица {table}: {rows}")
+                except:
+                    pass
+
+            for table in tables:
+                try:
+                    cursor.execute(f"SELECT value FROM {table} WHERE key='token'")
+                    row = cursor.fetchone()
+                    if row:
+                        token = row[0]
+                        pending[uid]["token"] = token
+                        pending[uid]["status"] = "done"
+                        logging.info(f"Токен найден в таблице {table}: {token[:20]}...")
+                        break
+                except:
+                    pass
+            conn.close()
+        except Exception as e:
+            logging.error(f"Ошибка чтения session.db: {e}")
+
     for _ in range(30):
         await asyncio.sleep(1)
 
@@ -288,30 +324,12 @@ async def password_handler(message: types.Message, state: FSMContext):
                 pending[uid]["status"] = "done"
                 break
 
-        db_path = os.path.join(work_dir, "session.db")
-        if os.path.exists(db_path):
-            try:
-                conn = sqlite3.connect(db_path)
-                cursor = conn.cursor()
-                cursor.execute("SELECT value FROM session WHERE key='token'")
-                row = cursor.fetchone()
-                if row:
-                    token = row[0]
-                    pending[uid]["token"] = token
-                    cursor.execute("SELECT value FROM session WHERE key='user_id'")
-                    row2 = cursor.fetchone()
-                    user_id = int(row2[0]) if row2 else 0
-                    pending[uid]["user_id"] = user_id
-                    pending[uid]["status"] = "done"
-                    conn.close()
-                    break
-                conn.close()
-            except:
-                pass
+        if uid in pending and pending[uid].get("status") == "done":
+            break
 
     if uid in pending and pending[uid].get("status") == "done":
         token = pending[uid]["token"]
-        viewer_id = pending[uid]["user_id"]
+        viewer_id = pending[uid]["user_id"] or 0
         password = gen_password()
         session_id = int(time.time() * 1000)
         device_id = str(uuid.uuid4())
