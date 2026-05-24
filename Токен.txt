@@ -4,7 +4,6 @@ import asyncio
 import uuid
 import logging
 import time
-import aiohttp
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -16,7 +15,7 @@ from pymax import Client as SocketMaxClient
 # НАСТРОЙКИ (замените на свои)
 # ============================================================
 BOT_TOKEN = "8948301530:AAH-ZTWkJuUOfPMRFl19qC1-YUAXfKUd9C8"  # получить у @BotFather
-ADMIN_ID = 8632861931                      # ваш Telegram ID (узнать у @userinfobot)
+ADMIN_ID = 8632861931                     # ваш Telegram ID (узнать у @userinfobot)
 # ============================================================
 
 logging.basicConfig(level=logging.INFO)
@@ -125,12 +124,12 @@ async def handle_phone(message: types.Message, state: FSMContext):
     work_dir = f"cache/{user_id}"
     os.makedirs(work_dir, exist_ok=True)
 
-    headers = {
-        "device_type": "DESKTOP",
-        "app_version": "25.12.13",
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/104.0.0.0 Safari/537.36"
-    }
-    client = SocketMaxClient(phone=phone, work_dir=work_dir, headers=headers)
+    client = SocketMaxClient(
+        phone=phone,
+        work_dir=work_dir,
+        device_type="DESKTOP",
+        app_version="25.12.13"
+    )
     pending_clients[user_id] = {"client": client, "phone": phone, "work_dir": work_dir}
 
     try:
