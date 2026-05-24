@@ -24,7 +24,7 @@ bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 
 # Свой провайдер кода, который не лезет в консоль
-class TelegramCodeProvider(auth_providers.CodeProvider):
+class TelegramCodeProvider(auth_providers.SmsCodeProvider):
     def __init__(self):
         self._code = None
         self._event = asyncio.Event()
