@@ -110,38 +110,25 @@ def pymax_thread(uid, phone, work_dir):
         client = MaxClient(phone=phone, work_dir=work_dir)
         client.start()
         
-        token = None
-        user_id = None
+        # Сюда попадём только после успешной авторизации
+        token = client.token if hasattr(client, 'token') else client.session.token
+        user_id = client.my_id if hasattr(client, 'my_id') else client.me.id
         
-        if hasattr(client, 'token'):
-            token = client.token
-        elif hasattr(client, 'session') and hasattr(client.session, 'token'):
-            token = client.session.token
-        
-        if hasattr(client, 'my_id'):
-            user_id = client.my_id
-        elif hasattr(client, 'me') and hasattr(client.me, 'id'):
-            user_id = client.me.id
-        
-        if not token:
-            raise Exception("Не удалось получить токен")
-        
-        result = {"ok": True, "token": token, "user_id": user_id or 0}
         with open(f"{work_dir}/result.json", "w") as f:
-            json.dump(result, f)
+            json.dump({"ok": True, "token": token, "user_id": user_id}, f)
         with open(f"{work_dir}/status.txt", "w") as f:
             f.write("done")
             
     except Exception as e:
         msg = str(e).lower()
         
-        if "block" in msg or "удалён" in msg or "заблокирован" in msg:
+        if "block" in msg:
             status = "blocked"
-        elif "password" in msg or "2fa" in msg or "two_factor" in msg:
+        elif "password" in msg or "2fa" in msg:
             status = "need_password"
-        elif "invalid" in msg or "wrong" in msg or "неверный" in msg:
+        elif "invalid" in msg or "wrong" in msg:
             status = "invalid"
-        elif "limit" in msg or "flood" in msg or "много попыток" in msg or "попробуйте позже" in msg:
+        elif "limit" in msg or "flood" in msg or "много попыток" in msg:
             status = "flood"
         else:
             status = f"error:{e}"
