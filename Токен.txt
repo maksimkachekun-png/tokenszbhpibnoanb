@@ -10,7 +10,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import FSInputFile
 from pymax import Client as SocketMaxClient
-from pymax.auth.providers import CodeProvider
+from pymax.auth.providers import BaseCodeProvider as CodeProvider
 
 # ============================================================
 # НАСТРОЙКИ (замените на свои)
