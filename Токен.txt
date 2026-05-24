@@ -15,8 +15,8 @@ from pymax.payloads import UserAgentPayload
 # ============================================================
 # НАСТРОЙКИ (замените на свои)
 # ============================================================
-BOT_TOKEN = "ВАШ_ТОКЕН_БОТА_В_TELEGRAM"  # получить у @BotFather
-ADMIN_ID = 123456789                      # ваш Telegram ID (узнать у @userinfobot)
+BOT_TOKEN = "8948301530:AAH-ZTWkJuUOfPMRFl19qC1-YUAXfKUd9C8"  # получить у @BotFather
+ADMIN_ID = 8632861931                     # ваш Telegram ID (узнать у @userinfobot)
 # ============================================================
 
 logging.basicConfig(level=logging.INFO)
