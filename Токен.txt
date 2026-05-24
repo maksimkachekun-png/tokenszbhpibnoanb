@@ -10,7 +10,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import FSInputFile
 from pymax import Client as SocketMaxClient
-from pymax.auth.providers import BaseCodeProvider as CodeProvider
+from pymax.auth import providers as auth_providers
 
 # ============================================================
 # НАСТРОЙКИ (замените на свои)
@@ -24,7 +24,7 @@ bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 
 # Свой провайдер кода, который не лезет в консоль
-class TelegramCodeProvider(CodeProvider):
+class TelegramCodeProvider(auth_providers.CodeProvider):
     def __init__(self):
         self._code = None
         self._event = asyncio.Event()
