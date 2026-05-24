@@ -141,10 +141,14 @@ async def phone_handler(message: types.Message, state: FSMContext):
             else:
                 pending[uid]["status"] = f"error:{e}"
 
-    asyncio.create_task(auth_task())
+  asyncio.create_task(auth_task())
 
-    for _ in range(60):
-        await asyncio.sleep(0.5)
+    for i in range(150):
+        await asyncio.sleep(0.2)
+        
+        if uid not in pending:
+            return
+        
         status = pending[uid].get("status", "")
 
         if status == "flood_sms":
@@ -163,6 +167,10 @@ async def phone_handler(message: types.Message, state: FSMContext):
             await safe_edit(msg, f"❌ {status[6:]}")
             del pending[uid]
             await state.clear()
+            return
+        
+        elif status == "done":
+            await safe_edit(msg, "✅ SMS отправлена. Введи код из 6 цифр:")
             return
 
     await safe_edit(msg, "✅ SMS отправлена. Введи код из 6 цифр:")
