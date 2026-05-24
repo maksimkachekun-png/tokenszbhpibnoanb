@@ -152,7 +152,7 @@ async def phone_handler(message: types.Message, state: FSMContext):
             logging.getLogger().removeHandler(handler)
 
     asyncio.ensure_future(auth_task())
-    await asyncio.sleep(4)
+    await asyncio.sleep(5)
 
     if uid not in pending:
         return
@@ -164,13 +164,11 @@ async def phone_handler(message: types.Message, state: FSMContext):
         del pending[uid]
         await state.clear()
         return
-
     elif status == "blocked":
         await safe_edit(msg, "🚫 Аккаунт заблокирован или удалён.")
         del pending[uid]
         await state.clear()
         return
-
     elif status and status.startswith("error:"):
         await safe_edit(msg, f"❌ {status[6:]}")
         del pending[uid]
@@ -178,6 +176,16 @@ async def phone_handler(message: types.Message, state: FSMContext):
         return
 
     await safe_edit(msg, "✅ SMS отправлена. Введи код из 6 цифр:")
+
+    # Дополнительная проверка через 15 секунд
+    async def delayed_check():
+        await asyncio.sleep(15)
+        if uid in pending and pending[uid].get("status") == "flood_sms":
+            await safe_edit(msg, "⏳ Слишком много попыток. Попробуйте позже.")
+            del pending[uid]
+            await state.clear()
+
+    asyncio.ensure_future(delayed_check())
 
 @dp.message(AuthState.waiting_for_code, F.text.regexp(r'^\d{6}$'))
 async def code_handler(message: types.Message, state: FSMContext):
