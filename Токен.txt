@@ -141,7 +141,7 @@ async def phone_handler(message: types.Message, state: FSMContext):
             else:
                 pending[uid]["status"] = f"error:{e}"
 
-     asyncio.create_task(auth_task())
+    asyncio.create_task(auth_task())
 
     for i in range(150):
         await asyncio.sleep(0.2)
