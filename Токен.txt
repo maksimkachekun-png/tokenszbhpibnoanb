@@ -14,8 +14,8 @@ from pymax import Client as SocketMaxClient
 # ============================================================
 # НАСТРОЙКИ (замените на свои)
 # ============================================================
-BOT_TOKEN = "8948301530:AAH-ZTWkJuUOfPMRFl19qC1-YUAXfKUd9C8"  # получить у @BotFather
-ADMIN_ID = 8632861931                     # ваш Telegram ID (узнать у @userinfobot)
+BOT_TOKEN = "8948301530:AAH-ZTWkJuUOfPMRFl19qC1-YUAXfKUd9C8"
+ADMIN_ID = 8632861931
 # ============================================================
 
 logging.basicConfig(level=logging.INFO)
@@ -126,9 +126,7 @@ async def handle_phone(message: types.Message, state: FSMContext):
 
     client = SocketMaxClient(
         phone=phone,
-        work_dir=work_dir,
-        device_type="DESKTOP",
-        app_version="25.12.13"
+        work_dir=work_dir
     )
     pending_clients[user_id] = {"client": client, "phone": phone, "work_dir": work_dir}
 
@@ -159,7 +157,7 @@ async def handle_code(message: types.Message, state: FSMContext):
     client = pending_clients[user_id]["client"]
 
     try:
-        result = await client.verify(code)
+        await client.verify(code)
 
         if hasattr(client, '_need_password') and client._need_password:
             await state.set_state(AuthState.waiting_for_password)
