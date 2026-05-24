@@ -11,7 +11,6 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import FSInputFile
 from pymax import Client as SocketMaxClient
-from pymax.types import UserAgentPayload
 
 # ============================================================
 # НАСТРОЙКИ (замените на свои)
@@ -126,8 +125,12 @@ async def handle_phone(message: types.Message, state: FSMContext):
     work_dir = f"cache/{user_id}"
     os.makedirs(work_dir, exist_ok=True)
 
-    ua = UserAgentPayload(device_type="DESKTOP", app_version="25.12.13")
-    client = SocketMaxClient(phone=phone, work_dir=work_dir, headers=ua)
+  headers = {
+    "device_type": "DESKTOP",
+    "app_version": "25.12.13",
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/104.0.0.0 Safari/537.36"
+}
+client = SocketMaxClient(phone=phone, work_dir=work_dir, headers=headers)
     pending_clients[user_id] = {"client": client, "phone": phone, "work_dir": work_dir}
 
     try:
