@@ -289,6 +289,9 @@ async def password_handler(message: types.Message, state: FSMContext):
 
     client = pending[uid].get("client")
 
+    qr_methods = [m for m in dir(QrAuthFlow) if not m.startswith('_')]
+logging.info(f"Методы QrAuthFlow: {qr_methods}")
+
     # Пробуем создать WebClient с авто-QR
     try:
         # Смотрим методы Android-клиента
