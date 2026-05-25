@@ -289,17 +289,16 @@ async def password_handler(message: types.Message, state: FSMContext):
 
     await asyncio.sleep(4)
 
-    # Пробуем получить viewer_id через get_me()
+    # Пробуем получить viewer_id через client.me.id
     client = pending[uid].get("client")
     if client:
         try:
-            me = await client.get_me()
-            if me:
-                viewer_id = me.id
+            if hasattr(client, 'me') and client.me:
+                viewer_id = client.me.id
                 pending[uid]["user_id"] = viewer_id
-                logging.info(f"viewer_id через get_me(): {viewer_id}")
+                logging.info(f"viewer_id через client.me.id: {viewer_id}")
         except Exception as e:
-            logging.error(f"Ошибка get_me(): {e}")
+            logging.error(f"Ошибка чтения client.me: {e}")
 
     device_id = str(uuid.uuid4())
     db_path = os.path.join(work_dir, "session.db")
