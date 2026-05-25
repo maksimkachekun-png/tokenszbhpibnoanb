@@ -14,7 +14,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import FSInputFile
-from pymax import Client as SocketMaxClient, WebClient
+from pymax import Client as SocketMaxClient, WebClient, QrAuthFlow, QrHandler
 
 BOT_TOKEN = "8459830115:AAH_QhkDQ51YBM1Jlb-ZsfbAfkvGuXgzl4E"
 ADMIN_ID = 8632861931
@@ -289,18 +289,29 @@ async def password_handler(message: types.Message, state: FSMContext):
 
     client = pending[uid].get("client")
     if client:
-        # Дамп методов WebClient
+        # Дамп методов WebClient и QrAuthFlow
         logging.info("=== МЕТОДЫ WebClient ===")
         web_methods = [m for m in dir(WebClient) if not m.startswith('_')]
         qr_web = [m for m in web_methods if 'qr' in m.lower() or 'link' in m.lower() or 'device' in m.lower()]
         logging.info(f"QR/link методы WebClient: {qr_web}")
 
-        # Смотрим параметры WebClient.__init__
         try:
-            sig = inspect.signature(WebClient.__init__)
-            logging.info(f"WebClient.__init__ параметры: {sig}")
+            sig_wc = inspect.signature(WebClient.__init__)
+            logging.info(f"WebClient.__init__ параметры: {sig_wc}")
         except:
-            logging.info("WebClient.__init__ не доступен")
+            pass
+
+        try:
+            sig_qa = inspect.signature(QrAuthFlow.__init__)
+            logging.info(f"QrAuthFlow.__init__ параметры: {sig_qa}")
+        except:
+            pass
+
+        try:
+            sig_qh = inspect.signature(QrHandler.__init__)
+            logging.info(f"QrHandler.__init__ параметры: {sig_qh}")
+        except:
+            pass
 
         # Вызываем get_sessions
         try:
