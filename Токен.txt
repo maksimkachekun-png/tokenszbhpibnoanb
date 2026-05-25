@@ -168,7 +168,7 @@ async def phone_handler(message: types.Message, state: FSMContext):
             logging.info(f"auth_task: завершена для uid={uid}, статус={pending.get(uid, {}).get('status', 'нет')}")
 
     asyncio.ensure_future(auth_task())
-    await asyncio.sleep(3)
+    await asyncio.sleep(6)  # Увеличено с 3 до 6 секунд
 
     if uid not in pending:
         logging.info(f"phone_handler: uid={uid} уже удалён из pending")
@@ -214,10 +214,11 @@ async def code_handler(message: types.Message, state: FSMContext):
     phone = data["phone"]
     work_dir = data["work_dir"]
 
+    msg = await safe_send(message, "⏳ Обрабатываю код...")
+    await asyncio.sleep(2)  # Даём pymax время дойти до input()
+
     import builtins
     builtins._code = code
-
-    msg = await safe_send(message, "⏳ Проверяю код...")
 
     for _ in range(240):
         await asyncio.sleep(0.5)
