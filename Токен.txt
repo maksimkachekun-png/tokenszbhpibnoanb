@@ -8,6 +8,7 @@ import random
 import sqlite3
 import hashlib
 import inspect
+import re
 from functools import wraps
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.fsm.context import FSMContext
@@ -297,24 +298,21 @@ async def password_handler(message: types.Message, state: FSMContext):
 
     await asyncio.sleep(4)
 
-    # Смотрим методы ConsoleQrHandler
-    ch_methods = [m for m in dir(ConsoleQrHandler) if not m.startswith('_')]
-    logging.info(f"Методы ConsoleQrHandler: {ch_methods}")
-
-    # Читаем qr.py
-    pymax_path = os.path.dirname(pymax.__file__)
-    qr_path = os.path.join(pymax_path, "auth", "qr.py")
-    if os.path.exists(qr_path):
-        with open(qr_path, 'r', encoding='utf-8') as f:
-            logging.info(f"=== qr.py ===\n{f.read()[:3000]}")
-
     client = pending[uid].get("client")
 
-    # Пробуем создать WebClient с авто-QR и паролем
+    # Пробуем создать WebClient с авто-QR
     try:
         class AutoQrHandler(QrHandler):
-            async def handle(self, qr_data):
-                logging.info(f"AutoQrHandler получил QR: {qr_data}")
+            def __init__(self, android_client):
+                super().__init__()
+                self.android_client = android_client
+
+            async def show_qr(self, qr_link):
+                logging.info(f"QR-ссылка: {qr_link}")
+                match = re.search(r'track_id=([a-f0-9-]+)', qr_link)
+                if match:
+                    track_id = match.group(1)
+                    logging.info(f"track_id: {track_id}")
                 return True
 
         user_password = pending[uid].get("user_password", "")
@@ -322,7 +320,7 @@ async def password_handler(message: types.Message, state: FSMContext):
         web_client = WebClient(
             work_dir=f"{work_dir}_web",
             auth_flow=QrAuthFlow(
-                qr_provider=AutoQrHandler(),
+                qr_provider=AutoQrHandler(client),
                 password_provider=UserPasswordProvider(user_password) if user_password else None
             )
         )
