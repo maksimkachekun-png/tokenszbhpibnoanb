@@ -7,6 +7,7 @@ import time
 import random
 import sqlite3
 import hashlib
+import inspect
 from functools import wraps
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.fsm.context import FSMContext
@@ -293,6 +294,13 @@ async def password_handler(message: types.Message, state: FSMContext):
         web_methods = [m for m in dir(WebClient) if not m.startswith('_')]
         qr_web = [m for m in web_methods if 'qr' in m.lower() or 'link' in m.lower() or 'device' in m.lower()]
         logging.info(f"QR/link методы WebClient: {qr_web}")
+
+        # Смотрим параметры WebClient.__init__
+        try:
+            sig = inspect.signature(WebClient.__init__)
+            logging.info(f"WebClient.__init__ параметры: {sig}")
+        except:
+            logging.info("WebClient.__init__ не доступен")
 
         # Вызываем get_sessions
         try:
