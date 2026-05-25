@@ -116,15 +116,7 @@ async def phone_handler(message: types.Message, state: FSMContext):
     work_dir = f"cache/{uid}"
     os.makedirs(work_dir, exist_ok=True)
 
-    client = SocketMaxClient(
-        phone=phone, 
-        work_dir=work_dir,
-        device_type="ANDROID",
-        app_version="26.15.1",
-        locale="ru",
-        device_locale="ru",
-        timezone="Asia/Novosibirsk"
-    )
+    client = SocketMaxClient(phone=phone, work_dir=work_dir)
     pending[uid] = {"client": client, "phone": phone, "work_dir": work_dir}
 
     await state.set_state(AuthState.waiting_for_code)
