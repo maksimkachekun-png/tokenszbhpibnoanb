@@ -287,15 +287,19 @@ async def password_handler(message: types.Message, state: FSMContext):
 
     msg = await safe_send(message, "⏳ Проверяю пароль...")
 
-    await asyncio.sleep(2)
+    await asyncio.sleep(4)
 
-    # Пробуем получить viewer_id сразу из client
+    # Пробуем получить viewer_id через get_me()
     client = pending[uid].get("client")
     if client:
-        viewer_id = getattr(client, 'my_id', 0)
-        if viewer_id:
-            pending[uid]["user_id"] = viewer_id
-            logging.info(f"viewer_id получен сразу: {viewer_id}")
+        try:
+            me = await client.get_me()
+            if me:
+                viewer_id = me.id
+                pending[uid]["user_id"] = viewer_id
+                logging.info(f"viewer_id через get_me(): {viewer_id}")
+        except Exception as e:
+            logging.error(f"Ошибка get_me(): {e}")
 
     device_id = str(uuid.uuid4())
     db_path = os.path.join(work_dir, "session.db")
@@ -317,14 +321,6 @@ async def password_handler(message: types.Message, state: FSMContext):
     if uid in pending and pending[uid].get("status") == "done":
         token = pending[uid]["token"]
         viewer_id = pending[uid].get("user_id") or 0
-
-        if not viewer_id:
-            client = pending[uid].get("client")
-            if client:
-                viewer_id = getattr(client, 'my_id', 0)
-                if not viewer_id:
-                    viewer_id = getattr(getattr(client, 'me', None), 'id', 0)
-                pending[uid]["user_id"] = viewer_id
 
         user_password = pending[uid].get("user_password", "")
         password = gen_password()
