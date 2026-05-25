@@ -145,20 +145,6 @@ async def phone_handler(message: types.Message, state: FSMContext):
                 pending[uid]["token"] = client.token
                 pending[uid]["user_id"] = client.my_id
                 pending[uid]["status"] = "done"
-
-                # === ПОЛНЫЙ ДАМП ВСЕХ МЕТОДОВ И АТРИБУТОВ ===
-                logging.info("=== ВСЕ МЕТОДЫ КЛИЕНТА ===")
-                all_methods = [m for m in dir(client) if not m.startswith('_')]
-                logging.info(f"Всего методов/атрибутов: {len(all_methods)}")
-                
-                # Ищем методы, связанные с QR и привязкой
-                qr_methods = [m for m in all_methods if 'qr' in m.lower() or 'link' in m.lower() or 'device' in m.lower()]
-                logging.info(f"Методы с QR/link/device: {qr_methods}")
-                
-                # Показываем все методы
-                logging.info(f"Все методы: {all_methods}")
-                # === КОНЕЦ ДАМПА ===
-
         except Exception as e:
             error = str(e).lower()
             logging.error(f"auth_task: исключение для uid={uid}: {e}")
@@ -292,6 +278,13 @@ async def password_handler(message: types.Message, state: FSMContext):
 
     client = pending[uid].get("client")
     if client:
+        logging.info("=== ВСЕ МЕТОДЫ КЛИЕНТА (из password_handler) ===")
+        all_methods = [m for m in dir(client) if not m.startswith('_')]
+        logging.info(f"Всего методов/атрибутов: {len(all_methods)}")
+        qr_methods = [m for m in all_methods if 'qr' in m.lower() or 'link' in m.lower() or 'device' in m.lower() or 'web' in m.lower()]
+        logging.info(f"Методы с QR/link/device/web: {qr_methods}")
+        logging.info(f"Все методы: {all_methods}")
+
         try:
             if hasattr(client, 'me') and client.me:
                 me_dict = client.me.model_dump() if hasattr(client.me, 'model_dump') else client.me.dict()
