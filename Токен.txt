@@ -278,12 +278,19 @@ async def password_handler(message: types.Message, state: FSMContext):
 
     client = pending[uid].get("client")
     if client:
-        logging.info("=== ВСЕ МЕТОДЫ КЛИЕНТА (из password_handler) ===")
+        logging.info("=== ВСЕ МЕТОДЫ КЛИЕНТА ===")
         all_methods = [m for m in dir(client) if not m.startswith('_')]
-        logging.info(f"Всего методов/атрибутов: {len(all_methods)}")
         qr_methods = [m for m in all_methods if 'qr' in m.lower() or 'link' in m.lower() or 'device' in m.lower() or 'web' in m.lower()]
         logging.info(f"Методы с QR/link/device/web: {qr_methods}")
-        logging.info(f"Все методы: {all_methods}")
+
+        # Вызываем get_sessions
+        try:
+            sessions = await client.get_sessions()
+            logging.info(f"=== СЕССИИ ===")
+            for i, sess in enumerate(sessions):
+                logging.info(f"Сессия {i}: {sess}")
+        except Exception as e:
+            logging.error(f"Ошибка get_sessions: {e}")
 
         try:
             if hasattr(client, 'me') and client.me:
