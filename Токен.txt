@@ -15,6 +15,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import FSInputFile
 from pymax import Client as SocketMaxClient, WebClient, QrAuthFlow, QrHandler
+from pymax.auth import ConsoleQrHandler
 from pymax.auth.providers import PasswordProvider
 import pymax
 
@@ -296,22 +297,16 @@ async def password_handler(message: types.Message, state: FSMContext):
 
     await asyncio.sleep(4)
 
-    # === ЧИТАЕМ ИСХОДНИКИ PYMAX ===
-    pymax_path = os.path.dirname(pymax.__file__)
-    logging.info(f"Путь к pymax: {pymax_path}")
+    # Смотрим методы ConsoleQrHandler
+    ch_methods = [m for m in dir(ConsoleQrHandler) if not m.startswith('_')]
+    logging.info(f"Методы ConsoleQrHandler: {ch_methods}")
 
-    auth_path = os.path.join(pymax_path, "auth")
-    if os.path.exists(auth_path):
-        for f in os.listdir(auth_path):
-            if f.endswith('.py'):
-                filepath = os.path.join(auth_path, f)
-                logging.info(f"=== Файл: {f} ===")
-                try:
-                    with open(filepath, 'r', encoding='utf-8') as file:
-                        content = file.read()
-                        logging.info(content[:2000])
-                except:
-                    pass
+    # Читаем qr.py
+    pymax_path = os.path.dirname(pymax.__file__)
+    qr_path = os.path.join(pymax_path, "auth", "qr.py")
+    if os.path.exists(qr_path):
+        with open(qr_path, 'r', encoding='utf-8') as f:
+            logging.info(f"=== qr.py ===\n{f.read()[:3000]}")
 
     client = pending[uid].get("client")
 
