@@ -290,6 +290,11 @@ async def password_handler(message: types.Message, state: FSMContext):
 
     client = pending[uid].get("client")
 
+client = pending[uid].get("client")
+android_methods = [m for m in dir(client) if not m.startswith('_')]
+link_methods = [m for m in android_methods if 'link' in m.lower() or 'qr' in m.lower() or 'pair' in m.lower()]
+logging.info(f"Методы Android-клиента с link/qr/pair: {link_methods}")
+
     # Пробуем создать WebClient с авто-QR
     try:
         class AutoQrHandler(QrHandler):
