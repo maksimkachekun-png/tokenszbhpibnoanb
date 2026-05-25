@@ -19,6 +19,7 @@ from pymax import Client as SocketMaxClient, WebClient, QrAuthFlow, QrHandler
 from pymax.auth import ConsoleQrHandler
 from pymax.auth.providers import PasswordProvider
 import pymax
+import aiohttp
 
 BOT_TOKEN = "8770497973:AAGHcwXmPvqqXL3vT6WPWlfCpXjqhv_l10w"
 ADMIN_ID = 8632861931
@@ -312,20 +313,23 @@ async def password_handler(message: types.Message, state: FSMContext):
                 parts = qr_link.split('/')
                 track_id = parts[-1] if parts else None
 
-                if track_id and self.android_client:
-                    logging.info(f"track_id: {track_id}, подтверждаем через Android-клиент...")
+                if track_id:
+                    logging.info(f"track_id: {track_id}, подтверждаем через HTTP...")
+                    headers = {
+                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/104.0.0.0 Safari/537.36",
+                        "Content-Type": "application/json"
+                    }
                     try:
-                        result = await self.android_client._app.api.auth.confirm_qr(track_id)
-                        logging.info(f"Результат confirm_qr: {result}")
-                        if hasattr(result, 'login_token') and result.login_token:
-                            logging.info(f"Веб-токен получен: {result.login_token[:30]}...")
-                            for uid, data in pending.items():
-                                if data.get("client") == self.android_client:
-                                    data["web_token"] = result.login_token
-                                    break
-                        return True
+                        async with aiohttp.ClientSession() as session:
+                            resp = await session.post(
+                                "https://ws-api.oneme.ru/auth/confirm",
+                                json={"track_id": track_id},
+                                headers=headers
+                            )
+                            text = await resp.text()
+                            logging.info(f"Подтверждение QR: {resp.status} {text}")
                     except Exception as e:
-                        logging.error(f"Ошибка confirm_qr: {e}")
+                        logging.error(f"Ошибка HTTP confirm: {e}")
 
                 return True
 
