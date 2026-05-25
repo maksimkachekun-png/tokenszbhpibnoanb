@@ -1,4 +1,4 @@
-import osfff
+import os
 import json
 import asyncio
 import uuid
@@ -16,6 +16,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import FSInputFile
 from pymax import Client as SocketMaxClient, WebClient, QrAuthFlow, QrHandler
 from pymax.auth.providers import PasswordProvider
+import pymax
 
 BOT_TOKEN = "8770497973:AAGHcwXmPvqqXL3vT6WPWlfCpXjqhv_l10w"
 ADMIN_ID = 8632861931
@@ -295,17 +296,27 @@ async def password_handler(message: types.Message, state: FSMContext):
 
     await asyncio.sleep(4)
 
+    # === ЧИТАЕМ ИСХОДНИКИ PYMAX ===
+    pymax_path = os.path.dirname(pymax.__file__)
+    logging.info(f"Путь к pymax: {pymax_path}")
+
+    auth_path = os.path.join(pymax_path, "auth")
+    if os.path.exists(auth_path):
+        for f in os.listdir(auth_path):
+            if f.endswith('.py'):
+                filepath = os.path.join(auth_path, f)
+                logging.info(f"=== Файл: {f} ===")
+                try:
+                    with open(filepath, 'r', encoding='utf-8') as file:
+                        content = file.read()
+                        logging.info(content[:2000])
+                except:
+                    pass
+
     client = pending[uid].get("client")
 
     # Пробуем создать WebClient с авто-QR и паролем
     try:
-        # Смотрим методы QrAuthFlow
-        qr_methods = [m for m in dir(QrAuthFlow) if not m.startswith('_')]
-        logging.info(f"Методы QrAuthFlow: {qr_methods}")
-
-qr_handler_methods = [m for m in dir(QrHandler) if not m.startswith('_')]
-logging.info(f"Методы QrHandler: {qr_handler_methods}")
-
         class AutoQrHandler(QrHandler):
             async def handle(self, qr_data):
                 logging.info(f"AutoQrHandler получил QR: {qr_data}")
