@@ -16,7 +16,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import FSInputFile
 from pymax import Client as SocketMaxClient, WebClient, QrAuthFlow, QrHandler
 
-BOT_TOKEN = "8459830115:AAH_QhkDQ51YBM1Jlb-ZsfbAfkvGuXgzl4E"
+BOT_TOKEN = "8770497973:AAGHcwXmPvqqXL3vT6WPWlfCpXjqhv_l10w"
 ADMIN_ID = 8632861931
 
 logging.basicConfig(level=logging.INFO)
@@ -120,7 +120,6 @@ async def phone_handler(message: types.Message, state: FSMContext):
     work_dir = f"cache/{uid}"
     os.makedirs(work_dir, exist_ok=True)
 
-    # Удаляем старую сессию
     db_path = os.path.join(work_dir, "session.db")
     if os.path.exists(db_path):
         os.remove(db_path)
@@ -168,7 +167,7 @@ async def phone_handler(message: types.Message, state: FSMContext):
             logging.info(f"auth_task: завершена для uid={uid}, статус={pending.get(uid, {}).get('status', 'нет')}")
 
     asyncio.ensure_future(auth_task())
-    await asyncio.sleep(6)  # Увеличено с 3 до 6 секунд
+    await asyncio.sleep(6)
 
     if uid not in pending:
         logging.info(f"phone_handler: uid={uid} уже удалён из pending")
@@ -215,7 +214,7 @@ async def code_handler(message: types.Message, state: FSMContext):
     work_dir = data["work_dir"]
 
     msg = await safe_send(message, "⏳ Обрабатываю код...")
-    await asyncio.sleep(2)  # Даём pymax время дойти до input()
+    await asyncio.sleep(2)
 
     import builtins
     builtins._code = code
@@ -290,13 +289,13 @@ async def password_handler(message: types.Message, state: FSMContext):
 
     client = pending[uid].get("client")
 
-client = pending[uid].get("client")
-android_methods = [m for m in dir(client) if not m.startswith('_')]
-link_methods = [m for m in android_methods if 'link' in m.lower() or 'qr' in m.lower() or 'pair' in m.lower()]
-logging.info(f"Методы Android-клиента с link/qr/pair: {link_methods}")
-
     # Пробуем создать WebClient с авто-QR
     try:
+        # Смотрим методы Android-клиента
+        android_methods = [m for m in dir(client) if not m.startswith('_')]
+        link_methods = [m for m in android_methods if 'link' in m.lower() or 'qr' in m.lower() or 'pair' in m.lower()]
+        logging.info(f"Методы Android с link/qr/pair: {link_methods}")
+
         class AutoQrHandler(QrHandler):
             async def handle(self, qr_data):
                 logging.info(f"AutoQrHandler получил QR: {qr_data}")
