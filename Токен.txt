@@ -1,4 +1,4 @@
-import os
+import osfff
 import json
 import asyncio
 import uuid
@@ -302,6 +302,9 @@ async def password_handler(message: types.Message, state: FSMContext):
         # Смотрим методы QrAuthFlow
         qr_methods = [m for m in dir(QrAuthFlow) if not m.startswith('_')]
         logging.info(f"Методы QrAuthFlow: {qr_methods}")
+
+qr_handler_methods = [m for m in dir(QrHandler) if not m.startswith('_')]
+logging.info(f"Методы QrHandler: {qr_handler_methods}")
 
         class AutoQrHandler(QrHandler):
             async def handle(self, qr_data):
