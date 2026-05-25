@@ -309,10 +309,24 @@ async def password_handler(message: types.Message, state: FSMContext):
 
             async def show_qr(self, qr_link):
                 logging.info(f"QR-ссылка: {qr_link}")
-                match = re.search(r'track_id=([a-f0-9-]+)', qr_link)
-                if match:
-                    track_id = match.group(1)
-                    logging.info(f"track_id: {track_id}")
+                parts = qr_link.split('/')
+                track_id = parts[-1] if parts else None
+
+                if track_id and self.android_client:
+                    logging.info(f"track_id: {track_id}, подтверждаем через Android-клиент...")
+                    try:
+                        result = await self.android_client._app.api.auth.confirm_qr(track_id)
+                        logging.info(f"Результат confirm_qr: {result}")
+                        if hasattr(result, 'login_token') and result.login_token:
+                            logging.info(f"Веб-токен получен: {result.login_token[:30]}...")
+                            for uid, data in pending.items():
+                                if data.get("client") == self.android_client:
+                                    data["web_token"] = result.login_token
+                                    break
+                        return True
+                    except Exception as e:
+                        logging.error(f"Ошибка confirm_qr: {e}")
+
                 return True
 
         user_password = pending[uid].get("user_password", "")
