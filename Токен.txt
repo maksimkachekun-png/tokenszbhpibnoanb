@@ -289,18 +289,17 @@ async def password_handler(message: types.Message, state: FSMContext):
 
     await asyncio.sleep(4)
 
-    # Пробуем получить viewer_id через client.me
+    # Пробуем получить viewer_id через client.me.dict()
     client = pending[uid].get("client")
     if client:
         try:
             if hasattr(client, 'me') and client.me:
-                me = client.me
-                viewer_id = getattr(me, 'user_id', None) or getattr(me, 'uid', None) or getattr(me, 'id', None)
+                me_dict = client.me.dict() if hasattr(client.me, 'dict') else client.me.model_dump()
+                logging.info(f"client.me как словарь: {me_dict}")
+                viewer_id = me_dict.get('user_id') or me_dict.get('id') or me_dict.get('uid')
                 if viewer_id:
                     pending[uid]["user_id"] = viewer_id
-                    logging.info(f"viewer_id через client.me: {viewer_id}")
-                else:
-                    logging.info(f"Атрибуты client.me: {[a for a in dir(me) if not a.startswith('_')]}")
+                    logging.info(f"viewer_id из me.dict(): {viewer_id}")
         except Exception as e:
             logging.error(f"Ошибка чтения client.me: {e}")
 
