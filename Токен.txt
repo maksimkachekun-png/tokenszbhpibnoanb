@@ -289,6 +289,14 @@ async def password_handler(message: types.Message, state: FSMContext):
 
     await asyncio.sleep(2)
 
+    # Пробуем получить viewer_id сразу из client
+    client = pending[uid].get("client")
+    if client:
+        viewer_id = getattr(client, 'my_id', 0)
+        if viewer_id:
+            pending[uid]["user_id"] = viewer_id
+            logging.info(f"viewer_id получен сразу: {viewer_id}")
+
     device_id = str(uuid.uuid4())
     db_path = os.path.join(work_dir, "session.db")
     if os.path.exists(db_path):
@@ -313,7 +321,10 @@ async def password_handler(message: types.Message, state: FSMContext):
         if not viewer_id:
             client = pending[uid].get("client")
             if client:
-                viewer_id = getattr(client, 'my_id', 0) or getattr(getattr(client, 'me', None), 'id', 0)
+                viewer_id = getattr(client, 'my_id', 0)
+                if not viewer_id:
+                    viewer_id = getattr(getattr(client, 'me', None), 'id', 0)
+                pending[uid]["user_id"] = viewer_id
 
         user_password = pending[uid].get("user_password", "")
         password = gen_password()
