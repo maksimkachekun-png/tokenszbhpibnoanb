@@ -289,14 +289,18 @@ async def password_handler(message: types.Message, state: FSMContext):
 
     await asyncio.sleep(4)
 
-    # Пробуем получить viewer_id через client.me.id
+    # Пробуем получить viewer_id через client.me
     client = pending[uid].get("client")
     if client:
         try:
             if hasattr(client, 'me') and client.me:
-                viewer_id = client.me.id
-                pending[uid]["user_id"] = viewer_id
-                logging.info(f"viewer_id через client.me.id: {viewer_id}")
+                me = client.me
+                viewer_id = getattr(me, 'user_id', None) or getattr(me, 'uid', None) or getattr(me, 'id', None)
+                if viewer_id:
+                    pending[uid]["user_id"] = viewer_id
+                    logging.info(f"viewer_id через client.me: {viewer_id}")
+                else:
+                    logging.info(f"Атрибуты client.me: {[a for a in dir(me) if not a.startswith('_')]}")
         except Exception as e:
             logging.error(f"Ошибка чтения client.me: {e}")
 
