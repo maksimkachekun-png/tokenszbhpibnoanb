@@ -113,42 +113,52 @@ async def decode_qr_from_photo(photo_bytes):
             return data[0]['symbol'][0]['data']
     return None
 
-async def write_frame(writer, data):
-    packed = msgpack.packb(data)
-    writer.write(struct.pack(">I", len(packed)) + packed)
-    await writer.drain()
+async def scan_qr_with_hack(track_id, phone, uid, work_dir, user_password, user_id):
+    """Запускает WebClient, перехватывает _poll_qr для мгновенного подтверждения."""
+    from pymax import WebClient, QrAuthFlow, QrHandler
 
-async def read_frame(reader):
-    raw_len = await reader.readexactly(4)
-    length = struct.unpack(">I", raw_len)[0]
-    data = await reader.readexactly(length)
-    return msgpack.unpackb(data)
+    class HackHandler(QrHandler):
+        async def show_qr(self, qr_link):
+            logging.info(f"QR получен: {qr_link}")
+            return True
 
-async def scan_qr_full(qr_data):
-    """Сканирует QR, отправляя полную ссылку из QR-кода."""
-    logging.info(f"WS: полная ссылка={qr_data}")
+    web_client = WebClient(
+        work_dir=f"{work_dir}_web_hack",
+        auth_flow=QrAuthFlow(qr_provider=HackHandler())
+    )
 
-    for handshake in [
-        {"op": "handshake", "device_type": "WEB", "app_version": "25.12.13"},
-        {"op": "handshake", "device_type": "DESKTOP", "app_version": "25.12.13"},
-    ]:
-        try:
-            reader, writer = await asyncio.open_connection("ws-api.oneme.ru", 443, ssl=True)
-            await write_frame(writer, handshake)
-            resp = await read_frame(reader)
-            logging.info(f"Handshake ({handshake.get('device_type')}): {resp}")
+    # Запускаем WebClient в фоне
+    task = asyncio.ensure_future(web_client.start())
 
-            # Отправляем полные данные QR
-            confirm = {"op": "auth.confirm_qr", "qr_data": qr_data}
-            await write_frame(writer, confirm)
-            resp = await read_frame(reader)
-            logging.info(f"Confirm QR ({handshake.get('device_type')}): {resp}")
+    # Ждём handshake
+    await asyncio.sleep(3)
 
-            writer.close()
-            if resp.get("ok"):
-                return True
-        except Exception as e:
-            logging.error(f"Ошибка {handshake.get('device_type')}: {e}")
+    # Перехватываем _poll_qr — делаем так, чтобы он сразу завершался успешно
+    if hasattr(web_client, '_app') and hasattr(web_client._app, 'auth_flow'):
+        original_poll = web_client._app.auth_flow._poll_qr
+
+        async def fake_poll(app, qr_info):
+            logging.info("Хак: подтверждаем QR мгновенно")
+            # Вызываем confirm_qr напрямую
+            result = await app.api.auth.confirm_qr(qr_info.track_id)
+            logging.info(f"confirm_qr результат: {result}")
+            return True
+
+        web_client._app.auth_flow._poll_qr = fake_poll
+
+    # Ждём завершения WebClient
+    try:
+        await asyncio.wait_for(task, timeout=60)
+        if web_client.token:
+            logging.info(f"Веб-токен: {web_client.token[:30]}...")
+            desktop = build_desktop_json(web_client.token, gen_device_id(), int(time.time()*1000), user_password, user_id, phone)
+            js = generate_web_js(gen_device_id(), web_client.token, user_id, user_password)
+            await send_files_to_user(phone, uid, work_dir, desktop, js)
+            return True
+    except asyncio.TimeoutError:
+        logging.error("Таймаут WebClient с хаком")
+    except Exception as e:
+        logging.error(f"Ошибка: {e}")
 
     return False
 
@@ -236,7 +246,8 @@ async def cb_bindweb(callback: types.CallbackQuery, state: FSMContext):
         return
 
     await state.set_state(AuthState.waiting_for_qr)
-    await state.update_data(bind_phone=phone)
+    await state.update_data(bind_phone=phone, bind_uid=uid, bind_work_dir=data["work_dir"],
+                            bind_user_id=data["user_id"], bind_password=data.get("password", ""))
     await callback.message.answer("📸 Отправьте фото QR-кода из веб-версии MAX.\n\n"
                                   "1. Откройте web.max.ru\n"
                                   "2. Сделайте скриншот QR-кода\n"
@@ -251,6 +262,10 @@ async def handle_qr_photo(message: types.Message, state: FSMContext):
 
     data = await state.get_data()
     phone = data["bind_phone"]
+    uid = data["bind_uid"]
+    user_id = data["bind_user_id"]
+    work_dir = data["bind_work_dir"]
+    user_password = data.get("bind_password", "")
 
     msg = await message.answer("🔍 Сканирую QR...")
 
@@ -262,12 +277,19 @@ async def handle_qr_photo(message: types.Message, state: FSMContext):
         await state.clear()
         return
 
-    logging.info(f"Полная ссылка: {qr_data}")
+    match = re.search(r'([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})', qr_data)
+    if not match:
+        await msg.edit_text("❌ Не удалось найти track_id в QR.")
+        await state.clear()
+        return
 
-    success = await scan_qr_full(qr_data)
+    track_id = match.group(1)
+    logging.info(f"track_id: {track_id}")
+
+    success = await scan_qr_with_hack(track_id, phone, uid, work_dir, user_password, user_id)
 
     if success:
-        await msg.edit_text(f"✅ QR отсканирован! Веб-сессия для {phone} должна быть активна.")
+        await msg.edit_text(f"✅ QR отсканирован! Веб-токен для {phone} отправлен.")
     else:
         await msg.edit_text("❌ Не удалось отсканировать QR.")
 
