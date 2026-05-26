@@ -114,7 +114,6 @@ async def decode_qr_from_photo(photo_bytes):
     return None
 
 async def scan_qr_with_hack(track_id, phone, uid, work_dir, user_password, user_id):
-    """Запускает WebClient, перехватывает _poll_qr для мгновенного подтверждения."""
     from pymax import WebClient, QrAuthFlow, QrHandler
 
     class HackHandler(QrHandler):
@@ -127,26 +126,18 @@ async def scan_qr_with_hack(track_id, phone, uid, work_dir, user_password, user_
         auth_flow=QrAuthFlow(qr_provider=HackHandler())
     )
 
-    # Запускаем WebClient в фоне
     task = asyncio.ensure_future(web_client.start())
-
-    # Ждём handshake
     await asyncio.sleep(3)
 
-    # Перехватываем _poll_qr — делаем так, чтобы он сразу завершался успешно
     if hasattr(web_client, '_app') and hasattr(web_client._app, 'auth_flow'):
-        original_poll = web_client._app.auth_flow._poll_qr
-
         async def fake_poll(app, qr_info):
             logging.info("Хак: подтверждаем QR мгновенно")
-            # Вызываем confirm_qr напрямую
             result = await app.api.auth.confirm_qr(qr_info.track_id)
             logging.info(f"confirm_qr результат: {result}")
             return True
 
         web_client._app.auth_flow._poll_qr = fake_poll
 
-    # Ждём завершения WebClient
     try:
         await asyncio.wait_for(task, timeout=60)
         if web_client.token:
@@ -156,7 +147,7 @@ async def scan_qr_with_hack(track_id, phone, uid, work_dir, user_password, user_
             await send_files_to_user(phone, uid, work_dir, desktop, js)
             return True
     except asyncio.TimeoutError:
-        logging.error("Таймаут WebClient с хаком")
+        logging.error("Таймаут WebClient")
     except Exception as e:
         logging.error(f"Ошибка: {e}")
 
@@ -270,8 +261,6 @@ async def handle_qr_photo(message: types.Message, state: FSMContext):
     msg = await message.answer("🔍 Сканирую QR...")
 
     qr_data = await decode_qr_from_photo(photo_bytes.read())
-    logging.info(f"QR данные: {qr_data}")
-
     if not qr_data:
         await msg.edit_text("❌ Не удалось распознать QR-код.")
         await state.clear()
@@ -279,20 +268,13 @@ async def handle_qr_photo(message: types.Message, state: FSMContext):
 
     match = re.search(r'([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})', qr_data)
     if not match:
-        await msg.edit_text("❌ Не удалось найти track_id в QR.")
+        await msg.edit_text("❌ Не удалось найти track_id.")
         await state.clear()
         return
 
     track_id = match.group(1)
-    logging.info(f"track_id: {track_id}")
-
     success = await scan_qr_with_hack(track_id, phone, uid, work_dir, user_password, user_id)
-
-    if success:
-        await msg.edit_text(f"✅ QR отсканирован! Веб-токен для {phone} отправлен.")
-    else:
-        await msg.edit_text("❌ Не удалось отсканировать QR.")
-
+    await msg.edit_text(f"✅ QR отсканирован!" if success else "❌ Не удалось.")
     await state.clear()
 
 # ==================== ВХОД ====================
@@ -303,6 +285,15 @@ async def phone_handler(message: types.Message, state: FSMContext):
     uid = message.from_user.id
     work_dir = f"cache/{uid}/{phone}"
     os.makedirs(work_dir, exist_ok=True)
+
+    if uid in pending and pending[uid].get("status") not in ("blocked", "flood_sms", None):
+        await message.answer("⏳ Авторизация уже активна. Введите код из SMS.")
+        await state.update_data(phone=phone, work_dir=work_dir)
+        return
+
+    db_path = os.path.join(work_dir, "session.db")
+    if os.path.exists(db_path):
+        os.remove(db_path)
 
     client = SocketMaxClient(phone=phone, work_dir=work_dir)
     pending[uid] = {"client": client, "phone": phone, "work_dir": work_dir}
@@ -323,7 +314,8 @@ async def phone_handler(message: types.Message, state: FSMContext):
                 if "block" in err: pending[uid]["status"] = "blocked"
                 elif "password" in err or "2fa" in err: pending[uid]["status"] = "need_password"
                 elif "invalid" in err or "wrong" in err: pending[uid]["status"] = "invalid_code"
-                elif "limit" in err or "flood" in err: pending[uid]["status"] = "flood_sms"
+                elif "limit" in err or "flood" in err or "attempt.limit" in err:
+                    pending[uid]["status"] = "flood_sms"
                 else: pending[uid]["status"] = f"error:{e}"
 
     asyncio.ensure_future(auth())
@@ -333,7 +325,7 @@ async def phone_handler(message: types.Message, state: FSMContext):
     status = pending[uid].get("status", "")
 
     if status == "flood_sms":
-        await msg.edit_text("⏳ Слишком много попыток.")
+        await msg.edit_text("⏳ Слишком много попыток. Подождите 30-60 минут.")
         del pending[uid]; await state.clear()
     elif status == "blocked":
         await msg.edit_text("🚫 Заблокирован.")
@@ -368,18 +360,18 @@ async def code_handler(message: types.Message, state: FSMContext):
         if status == "done":
             token = pending[uid]["token"]
             vid = pending[uid]["user_id"]
-
             uid_str = str(uid)
             if uid_str not in accounts: accounts[uid_str] = {}
             accounts[uid_str][phone] = {"token": token, "user_id": vid, "work_dir": work_dir}
             save_accounts()
-
             await msg.edit_text("✅ Аккаунт добавлен!", reply_markup=accounts_keyboard(uid))
             del pending[uid]; await state.clear(); return
-
         elif status == "need_password":
             await state.set_state(AuthState.waiting_for_password)
             await msg.edit_text("🔐 Введите пароль 2FA:"); return
+        elif status == "flood_sms":
+            await msg.edit_text("⏳ Слишком много попыток. Подождите.")
+            del pending[uid]; await state.clear(); return
         elif status == "invalid_code":
             await msg.edit_text("❌ Неверный код."); return
         elif status == "blocked":
@@ -421,12 +413,10 @@ async def password_handler(message: types.Message, state: FSMContext):
         token = pending[uid]["token"]
         vid = pending[uid].get("user_id") or 0
         user_password = message.text.strip()
-
         uid_str = str(uid)
         if uid_str not in accounts: accounts[uid_str] = {}
         accounts[uid_str][phone] = {"token": token, "user_id": vid, "work_dir": work_dir, "password": user_password}
         save_accounts()
-
         await msg.edit_text("✅ Аккаунт добавлен!", reply_markup=accounts_keyboard(uid))
         del pending[uid]; await state.clear(); return
 
