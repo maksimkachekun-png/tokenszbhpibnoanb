@@ -130,10 +130,20 @@ async def send_files_to_user(phone, user_id, work_dir, desktop, js):
 async def get_web_token(phone, uid, work_dir):
     track_id = None
     web_device_id = gen_device_id()
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/104.0.0.0 Safari/537.36",
-        "Content-Type": "application/json"
-    }
+
+    # Ищем методы сканирования у Android-клиента
+    client = None
+    for data in accounts.get(uid, {}).values():
+        if data.get("work_dir") == work_dir:
+            # Создаём клиент для проверки методов
+            try:
+                client = SocketMaxClient(phone=phone, work_dir=work_dir)
+                await client.start()
+                scan_methods = [m for m in dir(client) if 'scan' in m.lower() or 'confirm' in m.lower() or 'approve' in m.lower() or 'link' in m.lower()]
+                logging.info(f"Методы scan/confirm/approve/link: {scan_methods}")
+            except:
+                pass
+            break
 
     class TrackIdHandler(QrHandler):
         async def show_qr(self, qr_link):
@@ -156,6 +166,11 @@ async def get_web_token(phone, uid, work_dir):
         return None, web_device_id
 
     logging.info(f"track_id: {track_id}")
+
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/104.0.0.0 Safari/537.36",
+        "Content-Type": "application/json"
+    }
 
     async with aiohttp.ClientSession() as session:
         resp = await session.post(
