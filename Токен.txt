@@ -116,11 +116,12 @@ async def decode_qr_from_photo(photo_bytes):
 async def scan_qr_with_hack(track_id, phone, uid, work_dir, user_password, user_id):
     from pymax import WebClient, QrAuthFlow, QrHandler
 
-    # Подменяем метод в КЛАССЕ
     original_poll = QrAuthFlow._poll_qr
 
     async def fake_poll(self, app, qr_info):
-        logging.info(f"Хак: fake_poll вызван! track_id={qr_info.track_id}")
+        logging.info(f"Хак: ждём 10 секунд...")
+        await asyncio.sleep(10)
+        logging.info(f"Хак: подтверждаем QR, track_id={qr_info.track_id}")
         result = await app.api.auth.confirm_qr(qr_info.track_id)
         logging.info(f"confirm_qr результат: {result}")
         return True
