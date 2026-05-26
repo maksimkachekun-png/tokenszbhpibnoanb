@@ -113,54 +113,6 @@ async def decode_qr_from_photo(photo_bytes):
             return data[0]['symbol'][0]['data']
     return None
 
-async def scan_qr_via_websocket(photo_bytes):
-    qr_data = await decode_qr_from_photo(photo_bytes)
-    logging.info(f"QR данные: {qr_data}")
-    if not qr_data:
-        return None, None
-
-    match = re.search(r'([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})', qr_data)
-    if not match:
-        return None, None
-
-    track_id = match.group(1)
-    web_device_id = gen_device_id()
-    logging.info(f"Извлечён track_id: {track_id}")
-
-    # Пробуем как ANDROID
-    for device_type in ["ANDROID", "WEB"]:
-        try:
-            reader, writer = await asyncio.open_connection("ws-api.oneme.ru", 443, ssl=True)
-
-            handshake = {
-                "op": "handshake",
-                "device_type": device_type,
-                "app_version": "26.15.1" if device_type == "ANDROID" else "25.12.13",
-                "device_id": web_device_id,
-                "user_agent": "Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/104.0.0.0 Safari/537.36"
-            }
-            await write_frame(writer, handshake)
-            resp = await read_frame(reader)
-            logging.info(f"Handshake ({device_type}): {resp}")
-
-            confirm = {
-                "op": "auth.confirm_qr",
-                "track_id": track_id
-            }
-            await write_frame(writer, confirm)
-            resp = await read_frame(reader)
-            logging.info(f"Confirm QR ({device_type}): {resp}")
-
-            if resp.get("ok") and resp.get("login_token"):
-                writer.close()
-                return resp["login_token"], web_device_id
-
-            writer.close()
-        except Exception as e:
-            logging.error(f"Ошибка {device_type}: {e}")
-
-    return None, None
-
 async def write_frame(writer, data):
     packed = msgpack.packb(data)
     writer.write(struct.pack(">I", len(packed)) + packed)
@@ -171,6 +123,47 @@ async def read_frame(reader):
     length = struct.unpack(">I", raw_len)[0]
     data = await reader.readexactly(length)
     return msgpack.unpackb(data)
+
+async def get_web_token_via_websocket(track_id):
+    """Свой WebSocket-клиент: подключается, отправляет confirm_qr, получает login_token."""
+    web_device_id = gen_device_id()
+    logging.info(f"WS: подключаюсь, track_id={track_id}")
+
+    reader, writer = await asyncio.open_connection("ws-api.oneme.ru", 443, ssl=True)
+
+    # Handshake
+    handshake = {
+        "op": "handshake",
+        "device_type": "WEB",
+        "app_version": "25.12.13",
+        "device_id": web_device_id,
+        "user_agent": "Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/104.0.0.0 Safari/537.36"
+    }
+    await write_frame(writer, handshake)
+    resp = await read_frame(reader)
+    logging.info(f"WS handshake: {resp}")
+
+    # Подтверждаем QR
+    confirm = {
+        "op": "auth.confirm_qr",
+        "track_id": track_id
+    }
+    await write_frame(writer, confirm)
+    
+    # Читаем ответы, пока не получим login_token
+    for _ in range(5):
+        resp = await read_frame(reader)
+        logging.info(f"WS ответ: {resp}")
+        if resp.get("ok") and resp.get("login_token"):
+            writer.close()
+            return resp["login_token"], web_device_id
+        # Может быть password_challenge
+        if resp.get("password_challenge"):
+            logging.info(f"WS: запрошен пароль")
+            break
+
+    writer.close()
+    return None, None
 
 # ==================== МЕНЮ ====================
 
@@ -276,9 +269,27 @@ async def handle_qr_photo(message: types.Message, state: FSMContext):
     work_dir = data["bind_work_dir"]
     user_password = data.get("bind_password", "")
 
-    msg = await message.answer("🔍 Сканирую QR и подключаюсь через WebSocket...")
+    msg = await message.answer("🔍 Сканирую QR...")
 
-    web_token, web_device_id = await scan_qr_via_websocket(photo_bytes.read())
+    qr_data = await decode_qr_from_photo(photo_bytes.read())
+    logging.info(f"QR данные: {qr_data}")
+
+    if not qr_data:
+        await msg.edit_text("❌ Не удалось распознать QR-код.")
+        await state.clear()
+        return
+
+    match = re.search(r'([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})', qr_data)
+    if not match:
+        await msg.edit_text("❌ Не удалось найти track_id в QR.")
+        await state.clear()
+        return
+
+    track_id = match.group(1)
+    logging.info(f"track_id: {track_id}")
+
+    # Пробуем через свой WebSocket
+    web_token, web_device_id = await get_web_token_via_websocket(track_id)
 
     if web_token:
         desktop = build_desktop_json(web_token, web_device_id, int(time.time()*1000), user_password, user_id, phone)
@@ -286,7 +297,7 @@ async def handle_qr_photo(message: types.Message, state: FSMContext):
         await send_files_to_user(phone, message.from_user.id, work_dir, desktop, js)
         await msg.edit_text(f"✅ Веб-токен для {phone} готов!")
     else:
-        await msg.edit_text(f"❌ Не удалось получить веб-токен. Попробуйте ещё раз.")
+        await msg.edit_text("❌ Не удалось получить веб-токен.")
 
     await state.clear()
 
