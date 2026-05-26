@@ -124,46 +124,33 @@ async def read_frame(reader):
     data = await reader.readexactly(length)
     return msgpack.unpackb(data)
 
-async def get_web_token_via_websocket(track_id):
-    """Свой WebSocket-клиент: подключается, отправляет confirm_qr, получает login_token."""
-    web_device_id = gen_device_id()
-    logging.info(f"WS: подключаюсь, track_id={track_id}")
+async def scan_qr(track_id):
+    """Сканирует QR: подключается к ws-api, отправляет confirm_qr."""
+    logging.info(f"WS: track_id={track_id}")
 
-    reader, writer = await asyncio.open_connection("ws-api.oneme.ru", 443, ssl=True)
+    # Минимальный handshake
+    for handshake in [
+        {"op": "handshake", "device_type": "WEB", "app_version": "25.12.13"},
+        {"op": "handshake", "device_type": "DESKTOP", "app_version": "25.12.13"},
+    ]:
+        try:
+            reader, writer = await asyncio.open_connection("ws-api.oneme.ru", 443, ssl=True)
+            await write_frame(writer, handshake)
+            resp = await read_frame(reader)
+            logging.info(f"Handshake ({handshake.get('device_type')}): {resp}")
 
-    # Handshake
-    handshake = {
-        "op": "handshake",
-        "device_type": "WEB",
-        "app_version": "25.12.13",
-        "device_id": web_device_id,
-        "user_agent": "Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/104.0.0.0 Safari/537.36"
-    }
-    await write_frame(writer, handshake)
-    resp = await read_frame(reader)
-    logging.info(f"WS handshake: {resp}")
+            confirm = {"op": "auth.confirm_qr", "track_id": track_id}
+            await write_frame(writer, confirm)
+            resp = await read_frame(reader)
+            logging.info(f"Confirm QR ({handshake.get('device_type')}): {resp}")
 
-    # Подтверждаем QR
-    confirm = {
-        "op": "auth.confirm_qr",
-        "track_id": track_id
-    }
-    await write_frame(writer, confirm)
-    
-    # Читаем ответы, пока не получим login_token
-    for _ in range(5):
-        resp = await read_frame(reader)
-        logging.info(f"WS ответ: {resp}")
-        if resp.get("ok") and resp.get("login_token"):
             writer.close()
-            return resp["login_token"], web_device_id
-        # Может быть password_challenge
-        if resp.get("password_challenge"):
-            logging.info(f"WS: запрошен пароль")
-            break
+            if resp.get("ok"):
+                return True
+        except Exception as e:
+            logging.error(f"Ошибка {handshake.get('device_type')}: {e}")
 
-    writer.close()
-    return None, None
+    return False
 
 # ==================== МЕНЮ ====================
 
@@ -249,8 +236,7 @@ async def cb_bindweb(callback: types.CallbackQuery, state: FSMContext):
         return
 
     await state.set_state(AuthState.waiting_for_qr)
-    await state.update_data(bind_phone=phone, bind_work_dir=data["work_dir"],
-                            bind_user_id=data["user_id"], bind_password=data.get("password", ""))
+    await state.update_data(bind_phone=phone)
     await callback.message.answer("📸 Отправьте фото QR-кода из веб-версии MAX.\n\n"
                                   "1. Откройте web.max.ru\n"
                                   "2. Сделайте скриншот QR-кода\n"
@@ -265,9 +251,6 @@ async def handle_qr_photo(message: types.Message, state: FSMContext):
 
     data = await state.get_data()
     phone = data["bind_phone"]
-    user_id = data["bind_user_id"]
-    work_dir = data["bind_work_dir"]
-    user_password = data.get("bind_password", "")
 
     msg = await message.answer("🔍 Сканирую QR...")
 
@@ -288,16 +271,12 @@ async def handle_qr_photo(message: types.Message, state: FSMContext):
     track_id = match.group(1)
     logging.info(f"track_id: {track_id}")
 
-    # Пробуем через свой WebSocket
-    web_token, web_device_id = await get_web_token_via_websocket(track_id)
+    success = await scan_qr(track_id)
 
-    if web_token:
-        desktop = build_desktop_json(web_token, web_device_id, int(time.time()*1000), user_password, user_id, phone)
-        js = generate_web_js(web_device_id, web_token, user_id, user_password)
-        await send_files_to_user(phone, message.from_user.id, work_dir, desktop, js)
-        await msg.edit_text(f"✅ Веб-токен для {phone} готов!")
+    if success:
+        await msg.edit_text(f"✅ QR отсканирован! Веб-сессия для {phone} должна быть активна.")
     else:
-        await msg.edit_text("❌ Не удалось получить веб-токен.")
+        await msg.edit_text("❌ Не удалось отсканировать QR.")
 
     await state.clear()
 
