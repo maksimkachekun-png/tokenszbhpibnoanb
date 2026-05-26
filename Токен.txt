@@ -103,59 +103,52 @@ async def send_files_to_user(phone, user_id, work_dir, desktop, js):
 
 async def get_web_token_auto(phone, uid, work_dir, user_password, user_id):
     from pymax import WebClient, QrAuthFlow, QrHandler
-    import inspect
 
     original_poll = QrAuthFlow._poll_qr
 
     async def fake_poll(self, app, qr_info):
         logging.info(f"=== FAKE_POLL ===")
-        logging.info(f"qr_info: {qr_info}")
-        logging.info(f"qr_info.track_id: {qr_info.track_id}")
-        logging.info(f"qr_info.polling_interval: {qr_info.polling_interval}")
-        logging.info(f"qr_info.expires_at: {qr_info.expires_at}")
-        logging.info(f"app: {app}")
-        logging.info(f"app.api: {app.api}")
-        logging.info(f"app.api.auth: {app.api.auth}")
-        
-        # Все методы auth
-        auth_methods = [m for m in dir(app.api.auth) if not m.startswith('_')]
-        logging.info(f"Методы app.api.auth: {auth_methods}")
+        logging.info(f"app.device_id: {getattr(app, 'device_id', 'НЕТ')}")
+        logging.info(f"app.app_version: {getattr(app, 'app_version', 'НЕТ')}")
         
         logging.info(f"Хак: ждём 10 секунд...")
         await asyncio.sleep(10)
-        logging.info(f"Хак: подтверждаем QR, track_id={qr_info.track_id}")
+        logging.info(f"Хак: подтверждаем QR")
 
+        # Пробуем confirm_qr с разными параметрами
+        # 1. Только track_id
         try:
-            sig = inspect.signature(app.api.auth.confirm_qr)
-            logging.info(f"confirm_qr сигнатура: {sig}")
-        except:
-            pass
+            result = await app.api.auth.confirm_qr(qr_info.track_id)
+            logging.info(f"confirm_qr (track_id): {result}")
+            if hasattr(result, 'login_token') and result.login_token:
+                return True
+        except Exception as e:
+            logging.error(f"Ошибка 1: {e}")
 
-        result = await app.api.auth.confirm_qr(qr_info.track_id)
-        logging.info(f"confirm_qr результат: {result}")
-        logging.info(f"result тип: {type(result)}")
-        logging.info(f"result атрибуты: {[a for a in dir(result) if not a.startswith('_')]}")
-        logging.info(f"result.login_token: {getattr(result, 'login_token', 'НЕТ')}")
-        logging.info(f"result.password_challenge: {getattr(result, 'password_challenge', 'НЕТ')}")
-        
-        if hasattr(result, 'password_challenge') and result.password_challenge:
-            pc = result.password_challenge
-            logging.info(f"password_challenge: {pc}")
-            logging.info(f"password_challenge атрибуты: {[a for a in dir(pc) if not a.startswith('_')]}")
-            logging.info(f"password_challenge.track_id: {getattr(pc, 'track_id', 'НЕТ')}")
-            logging.info(f"password_challenge.hint: {getattr(pc, 'hint', 'НЕТ')}")
-            
-            if user_password:
-                logging.info(f"Отправляем пароль: {user_password}")
-                try:
-                    token = await app.api.auth.confirm_qr(
-                        qr_info.track_id,
-                        password=user_password
-                    )
-                    logging.info(f"confirm_qr с паролем: {token}")
-                    return True
-                except Exception as e:
-                    logging.error(f"Ошибка confirm_qr с паролем: {e}")
+        # 2. С device_id
+        try:
+            result = await app.api.auth.confirm_qr(qr_info.track_id, device_id=app.device_id)
+            logging.info(f"confirm_qr (device_id): {result}")
+            if hasattr(result, 'login_token') and result.login_token:
+                return True
+        except Exception as e:
+            logging.error(f"Ошибка 2: {e}")
+
+        # 3. web_login
+        try:
+            result = await app.api.auth.web_login(qr_info.track_id)
+            logging.info(f"web_login: {result}")
+            if hasattr(result, 'login_token') and result.login_token:
+                return True
+        except Exception as e:
+            logging.error(f"Ошибка 3: {e}")
+
+        # 4. login
+        try:
+            result = await app.api.auth.login(qr_info.track_id)
+            logging.info(f"login: {result}")
+        except Exception as e:
+            logging.error(f"Ошибка 4: {e}")
 
         return True
 
@@ -163,8 +156,7 @@ async def get_web_token_auto(phone, uid, work_dir, user_password, user_id):
 
     class AutoQrHandler(QrHandler):
         async def show_qr(self, qr_link):
-            logging.info(f"=== SHOW_QR ===")
-            logging.info(f"qr_link: {qr_link}")
+            logging.info(f"QR получен: {qr_link}")
             return True
 
     web_client = WebClient(
