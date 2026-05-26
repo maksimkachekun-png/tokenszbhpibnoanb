@@ -129,17 +129,36 @@ async def scan_qr_with_hack(track_id, phone, uid, work_dir, user_password, user_
     task = asyncio.ensure_future(web_client.start())
     await asyncio.sleep(3)
 
+    # Дампим методы auth_flow
     if hasattr(web_client, '_app') and hasattr(web_client._app, 'auth_flow'):
-        async def fake_poll(app, qr_info):
-            logging.info("Хак: подтверждаем QR мгновенно")
-            result = await app.api.auth.confirm_qr(qr_info.track_id)
-            logging.info(f"confirm_qr результат: {result}")
-            return True
+        af = web_client._app.auth_flow
+        logging.info(f"auth_flow тип: {type(af).__name__}")
+        logging.info(f"auth_flow методы: {[m for m in dir(af) if not m.startswith('_')]}")
 
-        web_client._app.auth_flow._poll_qr = fake_poll
+        # Ищем правильный метод для подмены
+        if hasattr(af, '_poll_qr'):
+            async def fake_poll(app, qr_info):
+                logging.info(f"Хак: fake_poll вызван! qr_info={qr_info}")
+                result = await app.api.auth.confirm_qr(qr_info.track_id)
+                logging.info(f"confirm_qr результат: {result}")
+                return True
+            af._poll_qr = fake_poll
+            logging.info("Хак: _poll_qr подменён")
+        elif hasattr(af, 'poll_qr'):
+            async def fake_poll(app, qr_info):
+                logging.info(f"Хак: poll_qr вызван!")
+                result = await app.api.auth.confirm_qr(qr_info.track_id)
+                logging.info(f"confirm_qr результат: {result}")
+                return True
+            af.poll_qr = fake_poll
+            logging.info("Хак: poll_qr подменён")
+        else:
+            logging.error("Не найден метод poll_qr")
+    else:
+        logging.error("Нет web_client._app или auth_flow")
 
     try:
-        await asyncio.wait_for(task, timeout=60)
+        await asyncio.wait_for(task, timeout=90)
         if web_client.token:
             logging.info(f"Веб-токен: {web_client.token[:30]}...")
             desktop = build_desktop_json(web_client.token, gen_device_id(), int(time.time()*1000), user_password, user_id, phone)
