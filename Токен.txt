@@ -315,6 +315,11 @@ async def phone_handler(message: types.Message, state: FSMContext):
     work_dir = f"cache/{uid}/{phone}"
     os.makedirs(work_dir, exist_ok=True)
 
+    if uid in pending:
+        await safe_send(message, "⏳ У вас уже активна авторизация. Введите код из SMS.")
+        await state.update_data(phone=phone, work_dir=work_dir)
+        return
+
     client = SocketMaxClient(phone=phone, work_dir=work_dir)
     pending[uid] = {"client": client, "phone": phone, "work_dir": work_dir}
 
@@ -325,7 +330,7 @@ async def phone_handler(message: types.Message, state: FSMContext):
     class FloodHandler(logging.Handler):
         def emit(self, record):
             msg_text = record.getMessage().lower()
-            if "limit.violate" in msg_text or "слишком много попыток" in msg_text or "попробуйте позже" in msg_text:
+            if "limit.violate" in msg_text or "слишком много попыток" in msg_text or "попробуйте позже" in msg_text or "attempt.limit" in msg_text:
                 if uid in pending:
                     pending[uid]["status"] = "flood_sms"
 
@@ -348,6 +353,8 @@ async def phone_handler(message: types.Message, state: FSMContext):
                     pending[uid]["status"] = "need_password"
                 elif "invalid" in error or "wrong" in error:
                     pending[uid]["status"] = "invalid_code"
+                elif "attempt.limit" in error or "код устарел" in error:
+                    pending[uid]["status"] = "flood_sms"
                 else:
                     pending[uid]["status"] = f"error:{e}"
         finally:
@@ -362,7 +369,7 @@ async def phone_handler(message: types.Message, state: FSMContext):
     status = pending[uid].get("status", "")
 
     if status == "flood_sms":
-        await safe_edit(msg, "⏳ Слишком много попыток.")
+        await safe_edit(msg, "⏳ Слишком много попыток. Подождите 30-60 минут и попробуйте снова.")
         del pending[uid]
         await state.clear()
         return
