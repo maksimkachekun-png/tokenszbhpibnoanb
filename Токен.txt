@@ -6,6 +6,7 @@ import logging
 import time
 import re
 import struct
+import sqlite3
 import aiohttp
 from io import BytesIO
 from aiogram import Bot, Dispatcher, types, F
@@ -126,32 +127,38 @@ async def scan_qr_via_websocket(photo_bytes):
     web_device_id = gen_device_id()
     logging.info(f"Извлечён track_id: {track_id}")
 
-    reader, writer = await asyncio.open_connection("ws-api.oneme.ru", 443, ssl=True)
+    # Пробуем как ANDROID
+    for device_type in ["ANDROID", "WEB"]:
+        try:
+            reader, writer = await asyncio.open_connection("ws-api.oneme.ru", 443, ssl=True)
 
-    handshake = {
-        "op": "handshake",
-        "device_type": "WEB",
-        "app_version": "25.12.13",
-        "device_id": web_device_id,
-        "user_agent": "Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/104.0.0.0 Safari/537.36"
-    }
-    await write_frame(writer, handshake)
-    resp = await read_frame(reader)
-    logging.info(f"Handshake: {resp}")
+            handshake = {
+                "op": "handshake",
+                "device_type": device_type,
+                "app_version": "26.15.1" if device_type == "ANDROID" else "25.12.13",
+                "device_id": web_device_id,
+                "user_agent": "Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/104.0.0.0 Safari/537.36"
+            }
+            await write_frame(writer, handshake)
+            resp = await read_frame(reader)
+            logging.info(f"Handshake ({device_type}): {resp}")
 
-    confirm = {
-        "op": "auth.confirm_qr",
-        "track_id": track_id
-    }
-    await write_frame(writer, confirm)
-    resp = await read_frame(reader)
-    logging.info(f"Confirm QR: {resp}")
+            confirm = {
+                "op": "auth.confirm_qr",
+                "track_id": track_id
+            }
+            await write_frame(writer, confirm)
+            resp = await read_frame(reader)
+            logging.info(f"Confirm QR ({device_type}): {resp}")
 
-    if resp.get("ok") and resp.get("login_token"):
-        writer.close()
-        return resp["login_token"], web_device_id
+            if resp.get("ok") and resp.get("login_token"):
+                writer.close()
+                return resp["login_token"], web_device_id
 
-    writer.close()
+            writer.close()
+        except Exception as e:
+            logging.error(f"Ошибка {device_type}: {e}")
+
     return None, None
 
 async def write_frame(writer, data):
@@ -388,26 +395,10 @@ async def password_handler(message: types.Message, state: FSMContext):
 
     import builtins
     builtins._password = message.text.strip()
-    pending[uid]["user_password"] = builtins._password
 
     msg = await message.answer("⏳ Проверяю пароль...")
-    await asyncio.sleep(4)
+    await asyncio.sleep(5)
 
-    # Проверяем статус — если pending[uid]["status"] == "done", значит пароль верный
-    if pending[uid].get("status") == "done":
-        token = pending[uid]["token"]
-        vid = pending[uid].get("user_id") or 0
-        user_password = pending[uid].get("user_password", "")
-
-        uid_str = str(uid)
-        if uid_str not in accounts: accounts[uid_str] = {}
-        accounts[uid_str][phone] = {"token": token, "user_id": vid, "work_dir": work_dir, "password": user_password}
-        save_accounts()
-
-        await msg.edit_text("✅ Аккаунт добавлен!", reply_markup=accounts_keyboard(uid))
-        del pending[uid]; await state.clear(); return
-
-    # Если статус не done — проверяем session.db
     db_path = os.path.join(work_dir, "session.db")
     if os.path.exists(db_path):
         try:
@@ -424,7 +415,7 @@ async def password_handler(message: types.Message, state: FSMContext):
     if pending[uid].get("status") == "done":
         token = pending[uid]["token"]
         vid = pending[uid].get("user_id") or 0
-        user_password = pending[uid].get("user_password", "")
+        user_password = message.text.strip()
 
         uid_str = str(uid)
         if uid_str not in accounts: accounts[uid_str] = {}
@@ -434,7 +425,6 @@ async def password_handler(message: types.Message, state: FSMContext):
         await msg.edit_text("✅ Аккаунт добавлен!", reply_markup=accounts_keyboard(uid))
         del pending[uid]; await state.clear(); return
 
-    # Если всё ещё не done — неверный пароль
     await msg.edit_text("❌ Неверный пароль. Попробуйте ещё раз.")
 
 async def main():
