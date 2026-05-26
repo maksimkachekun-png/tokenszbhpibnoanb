@@ -142,7 +142,7 @@ async def decode_qr_from_photo(photo_bytes):
             return data[0]['symbol'][0]['data']
     return None
 
-async def scan_qr_and_get_web_token(phone, uid, work_dir, photo_bytes):
+async def scan_qr_and_get_web_token(photo_bytes):
     qr_data = await decode_qr_from_photo(photo_bytes)
     logging.info(f"QR данные: {qr_data}")
 
@@ -155,17 +155,6 @@ async def scan_qr_and_get_web_token(phone, uid, work_dir, photo_bytes):
 
     track_id = match.group(1)
     logging.info(f"Извлечён track_id: {track_id}")
-
-    client = SocketMaxClient(phone=phone, work_dir=work_dir)
-    try:
-        await client.start()
-        if hasattr(client._app.api.auth, 'confirm_qr'):
-            result = await client._app.api.auth.confirm_qr(track_id)
-            logging.info(f"Результат confirm_qr через клиент: {result}")
-            if hasattr(result, 'login_token') and result.login_token:
-                return result.login_token, gen_device_id()
-    except Exception as e:
-        logging.error(f"Ошибка confirm_qr через клиент: {e}")
 
     headers = {
         "User-Agent": "Mozilla/5.0 ...",
@@ -299,15 +288,13 @@ async def handle_qr_photo(message: types.Message, state: FSMContext):
 
     data = await state.get_data()
     phone = data["bind_phone"]
-    uid = data["bind_uid"]
-    work_dir = data["bind_work_dir"]
-    token = data["bind_token"]
     user_id = data["bind_user_id"]
+    work_dir = data["bind_work_dir"]
     user_password = data.get("bind_password", "")
 
     msg = await message.answer("🔍 Сканирую QR-код...")
 
-    web_token, web_device_id = await scan_qr_and_get_web_token(phone, uid, work_dir, photo_bytes.read())
+    web_token, web_device_id = await scan_qr_and_get_web_token(photo_bytes.read())
 
     if web_token:
         desktop = build_desktop_json(web_token, web_device_id, int(time.time()*1000), user_password, user_id, phone)
@@ -327,14 +314,6 @@ async def phone_handler(message: types.Message, state: FSMContext):
     uid = message.from_user.id
     work_dir = f"cache/{uid}/{phone}"
     os.makedirs(work_dir, exist_ok=True)
-
-    if uid in pending:
-        await safe_send(message, "⏳ У вас уже активна авторизация. Введите код из SMS.")
-        return
-
-    db_path = os.path.join(work_dir, "session.db")
-    if os.path.exists(db_path):
-        os.remove(db_path)
 
     client = SocketMaxClient(phone=phone, work_dir=work_dir)
     pending[uid] = {"client": client, "phone": phone, "work_dir": work_dir}
@@ -369,9 +348,6 @@ async def phone_handler(message: types.Message, state: FSMContext):
                     pending[uid]["status"] = "need_password"
                 elif "invalid" in error or "wrong" in error:
                     pending[uid]["status"] = "invalid_code"
-                elif "password2fa.wrong" in error or "password wrong" in error:
-                    # Неверный пароль 2FA — оставляем need_password
-                    pass
                 else:
                     pending[uid]["status"] = f"error:{e}"
         finally:
@@ -409,11 +385,16 @@ async def code_handler(message: types.Message, state: FSMContext):
     code = str(message.text.strip())
 
     if uid not in pending:
-        return await safe_send(message, "⏳ Сессия устарела.")
+        return await safe_send(message, "⏳ Сессия устарела. Отправьте номер заново через /start.")
 
     data = await state.get_data()
-    phone = data["phone"]
-    work_dir = data["work_dir"]
+    phone = data.get("phone")
+    work_dir = data.get("work_dir")
+
+    if not phone or not work_dir:
+        await safe_send(message, "⏳ Данные устарели. Отправьте номер заново через /start.")
+        await state.clear()
+        return
 
     import builtins
     builtins._code = code
@@ -454,7 +435,7 @@ async def code_handler(message: types.Message, state: FSMContext):
             return
 
         elif status == "invalid_code":
-            await safe_edit(msg, "❌ Неверный код.")
+            await safe_edit(msg, "❌ Неверный код. Попробуй ещё раз.")
             return
 
         elif status == "blocked":
@@ -479,11 +460,16 @@ async def password_handler(message: types.Message, state: FSMContext):
     pwd = message.text.strip()
 
     if uid not in pending:
-        return await safe_send(message, "⏳ Сессия устарела.")
+        return await safe_send(message, "⏳ Сессия устарела. Отправьте номер заново через /start.")
 
     data = await state.get_data()
-    phone = data["phone"]
-    work_dir = data["work_dir"]
+    phone = data.get("phone")
+    work_dir = data.get("work_dir")
+
+    if not phone or not work_dir:
+        await safe_send(message, "⏳ Данные устарели. Отправьте номер заново через /start.")
+        await state.clear()
+        return
 
     import builtins
     builtins._password = pwd
@@ -529,7 +515,6 @@ async def password_handler(message: types.Message, state: FSMContext):
         return
 
     elif pending[uid].get("status") == "need_password":
-        # Неверный пароль — просим ещё раз
         await safe_edit(msg, "❌ Неверный пароль. Попробуйте ещё раз.")
         return
 
