@@ -131,7 +131,6 @@ async def send_files_to_user(phone, user_id, work_dir, desktop, js):
         caption=f"💻 Десктоп\nНомер: {phone}")
 
 async def decode_qr_from_photo(photo_bytes):
-    """Распознаёт QR через внешний API."""
     url = "https://api.qrserver.com/v1/read-qr-code/"
     form = aiohttp.FormData()
     form.add_field('file', photo_bytes, filename='qr.png', content_type='image/png')
@@ -144,7 +143,6 @@ async def decode_qr_from_photo(photo_bytes):
     return None
 
 async def scan_qr_and_get_web_token(phone, uid, work_dir, photo_bytes):
-    """Сканирует QR с фото, извлекает track_id и подтверждает через Android-клиент."""
     qr_data = await decode_qr_from_photo(photo_bytes)
     logging.info(f"QR данные: {qr_data}")
 
@@ -158,7 +156,6 @@ async def scan_qr_and_get_web_token(phone, uid, work_dir, photo_bytes):
     track_id = match.group(1)
     logging.info(f"Извлечён track_id: {track_id}")
 
-    # Подтверждаем через Android-клиент
     client = SocketMaxClient(phone=phone, work_dir=work_dir)
     try:
         await client.start()
@@ -170,7 +167,6 @@ async def scan_qr_and_get_web_token(phone, uid, work_dir, photo_bytes):
     except Exception as e:
         logging.error(f"Ошибка confirm_qr через клиент: {e}")
 
-    # Fallback: HTTP
     headers = {
         "User-Agent": "Mozilla/5.0 ...",
         "Content-Type": "application/json"
@@ -373,6 +369,9 @@ async def phone_handler(message: types.Message, state: FSMContext):
                     pending[uid]["status"] = "need_password"
                 elif "invalid" in error or "wrong" in error:
                     pending[uid]["status"] = "invalid_code"
+                elif "password2fa.wrong" in error or "password wrong" in error:
+                    # Неверный пароль 2FA — оставляем need_password
+                    pass
                 else:
                     pending[uid]["status"] = f"error:{e}"
         finally:
@@ -527,6 +526,11 @@ async def password_handler(message: types.Message, state: FSMContext):
         await safe_edit(msg, "✅ Аккаунт добавлен!", reply_markup=accounts_keyboard(uid))
         del pending[uid]
         await state.clear()
+        return
+
+    elif pending[uid].get("status") == "need_password":
+        # Неверный пароль — просим ещё раз
+        await safe_edit(msg, "❌ Неверный пароль. Попробуйте ещё раз.")
         return
 
     await safe_edit(msg, "❌ Токен не найден.")
