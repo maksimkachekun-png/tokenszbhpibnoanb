@@ -72,16 +72,12 @@ async def safe_edit(msg, text, reply_markup=None):
 async def safe_send(message, text, reply_markup=None):
     return await message.answer(text, reply_markup=reply_markup)
 
-def gen_password():
-    import random as _random, string
-    return ''.join(_random.choices(string.ascii_letters + string.digits + "_@#", k=40))
-
 def gen_device_id():
     import random as _random
     return ''.join(_random.choices('0123456789abcdef', k=16))
 
 def build_desktop_json(token, device_id, session_id, password, user_id, phone):
-    return {
+    data = {
         "token": token,
         "deviceType": "ANDROID",
         "appVersion": "26.15.1",
@@ -97,7 +93,6 @@ def build_desktop_json(token, device_id, session_id, password, user_id, phone):
         "deviceLocale": "ru",
         "deviceId": device_id,
         "clientSessionId": session_id,
-        "password": password,
         "user": {
             "user_id": user_id,
             "phone": int(phone.replace("+", "")),
@@ -106,9 +101,15 @@ def build_desktop_json(token, device_id, session_id, password, user_id, phone):
             "last_name": ""
         }
     }
+    if password:
+        data["password"] = password
+    return data
 
-def generate_web_js(device_id, token, viewer_id):
-    auth_str = json.dumps({"token": token, "viewerId": viewer_id}, ensure_ascii=False, separators=(',', ':'))
+def generate_web_js(device_id, token, viewer_id, password=None):
+    auth = {"token": token, "viewerId": viewer_id}
+    if password:
+        auth["password"] = password
+    auth_str = json.dumps(auth, ensure_ascii=False, separators=(',', ':'))
     return f"""sessionStorage.clear();
 localStorage.clear();
 localStorage.setItem('__oneme_device_id', '{device_id}');
@@ -130,20 +131,10 @@ async def send_files_to_user(phone, user_id, work_dir, desktop, js):
 async def get_web_token(phone, uid, work_dir):
     track_id = None
     web_device_id = gen_device_id()
-
-    # Ищем методы сканирования у Android-клиента
-    client = None
-    for data in accounts.get(uid, {}).values():
-        if data.get("work_dir") == work_dir:
-            # Создаём клиент для проверки методов
-            try:
-                client = SocketMaxClient(phone=phone, work_dir=work_dir)
-                await client.start()
-                scan_methods = [m for m in dir(client) if 'scan' in m.lower() or 'confirm' in m.lower() or 'approve' in m.lower() or 'link' in m.lower()]
-                logging.info(f"Методы scan/confirm/approve/link: {scan_methods}")
-            except:
-                pass
-            break
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/104.0.0.0 Safari/537.36",
+        "Content-Type": "application/json"
+    }
 
     class TrackIdHandler(QrHandler):
         async def show_qr(self, qr_link):
@@ -166,11 +157,6 @@ async def get_web_token(phone, uid, work_dir):
         return None, web_device_id
 
     logging.info(f"track_id: {track_id}")
-
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/104.0.0.0 Safari/537.36",
-        "Content-Type": "application/json"
-    }
 
     async with aiohttp.ClientSession() as session:
         resp = await session.post(
@@ -277,9 +263,10 @@ async def cb_desk(callback: types.CallbackQuery):
     user_id = data["user_id"]
     work_dir = data["work_dir"]
     device_id = gen_device_id()
+    user_password = data.get("password", "")
 
-    desktop = build_desktop_json(token, device_id, int(time.time()*1000), gen_password(), user_id, phone)
-    js = generate_web_js(device_id, token, user_id)
+    desktop = build_desktop_json(token, device_id, int(time.time()*1000), user_password, user_id, phone)
+    js = generate_web_js(device_id, token, user_id, user_password)
 
     await send_files_to_user(phone, callback.from_user.id, work_dir, desktop, js)
     await callback.answer("Отправлено!")
@@ -299,8 +286,9 @@ async def cb_web(callback: types.CallbackQuery):
     async def do_web_login():
         web_token, web_device_id = await get_web_token(phone, uid, data["work_dir"])
         if web_token:
-            desktop = build_desktop_json(web_token, web_device_id, int(time.time()*1000), gen_password(), data["user_id"], phone)
-            js = generate_web_js(web_device_id, web_token, data["user_id"])
+            user_password = data.get("password", "")
+            desktop = build_desktop_json(web_token, web_device_id, int(time.time()*1000), user_password, data["user_id"], phone)
+            js = generate_web_js(web_device_id, web_token, data["user_id"], user_password)
             await send_files_to_user(phone, callback.from_user.id, data["work_dir"], desktop, js)
             await msg.edit_text(f"✅ Веб-токен для {phone} готов!")
         else:
@@ -496,6 +484,7 @@ async def password_handler(message: types.Message, state: FSMContext):
     if pending[uid].get("status") == "done":
         token = pending[uid]["token"]
         viewer_id = pending[uid].get("user_id") or 0
+        user_password = pending[uid].get("user_password", "")
 
         uid_str = str(uid)
         if uid_str not in accounts:
@@ -503,7 +492,8 @@ async def password_handler(message: types.Message, state: FSMContext):
         accounts[uid_str][phone] = {
             "token": token,
             "user_id": viewer_id,
-            "work_dir": work_dir
+            "work_dir": work_dir,
+            "password": user_password
         }
         save_accounts()
 
