@@ -15,7 +15,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import FSInputFile, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.utils.keyboard import InlineKeyboardBuilder
-from pymax import Client as SocketMaxClient
+from pymax import Client as SocketMaxClient, WebClient, QrAuthFlow, QrHandler
 import msgpack
 
 BOT_TOKEN = "8974560846:AAFcnYE-RXFl8d7ct0gpEQlQfIe6FBRNrxI"
@@ -124,11 +124,10 @@ async def read_frame(reader):
     data = await reader.readexactly(length)
     return msgpack.unpackb(data)
 
-async def scan_qr(track_id):
-    """Сканирует QR: подключается к ws-api, отправляет confirm_qr."""
-    logging.info(f"WS: track_id={track_id}")
+async def scan_qr_full(qr_data):
+    """Сканирует QR, отправляя полную ссылку из QR-кода."""
+    logging.info(f"WS: полная ссылка={qr_data}")
 
-    # Минимальный handshake
     for handshake in [
         {"op": "handshake", "device_type": "WEB", "app_version": "25.12.13"},
         {"op": "handshake", "device_type": "DESKTOP", "app_version": "25.12.13"},
@@ -139,7 +138,8 @@ async def scan_qr(track_id):
             resp = await read_frame(reader)
             logging.info(f"Handshake ({handshake.get('device_type')}): {resp}")
 
-            confirm = {"op": "auth.confirm_qr", "track_id": track_id}
+            # Отправляем полные данные QR
+            confirm = {"op": "auth.confirm_qr", "qr_data": qr_data}
             await write_frame(writer, confirm)
             resp = await read_frame(reader)
             logging.info(f"Confirm QR ({handshake.get('device_type')}): {resp}")
@@ -262,16 +262,9 @@ async def handle_qr_photo(message: types.Message, state: FSMContext):
         await state.clear()
         return
 
-    match = re.search(r'([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})', qr_data)
-    if not match:
-        await msg.edit_text("❌ Не удалось найти track_id в QR.")
-        await state.clear()
-        return
+    logging.info(f"Полная ссылка: {qr_data}")
 
-    track_id = match.group(1)
-    logging.info(f"track_id: {track_id}")
-
-    success = await scan_qr(track_id)
+    success = await scan_qr_full(qr_data)
 
     if success:
         await msg.edit_text(f"✅ QR отсканирован! Веб-сессия для {phone} должна быть активна.")
