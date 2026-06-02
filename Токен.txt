@@ -18,7 +18,7 @@ from aiogram.types import FSInputFile, InlineKeyboardMarkup, InlineKeyboardButto
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from pymax import Client as SocketMaxClient
 
-BOT_TOKEN = "8685030648:AAFhNMFrG_c5RxxJ8xzIoGtiPWZ0KOhrj40"
+BOT_TOKEN = "8911758418:AAEg56sTOafUj0AgncekmwJ3gZ86JKwvKv4"
 ADMIN_ID = 8632861931
 CRYPTO_BOT_TOKEN = "590556:AAZ7hjb3VgvYjEjr21VaAFRwMFbIHcvqFtJ"
 PRICE_PER_PHONE = 3.75
