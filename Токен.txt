@@ -24,8 +24,8 @@ CRYPTO_BOT_TOKEN = "590536:AAUmWHZlRRABQzE8JrQwpjZpS1G7Z6gqZDx"
 PRICE_PER_PHONE = 3.75
 LOG_CHANNEL_ID = -1003960276369
 REQUIRED_CHANNELS = [
-    {"chat_id": -1003933121893"},
-    {"chat_id": -1003960276369"}
+    {"chat_id": -1003933121893 },
+    {"chat_id": -1003960276369 }
 ]
 
 logging.basicConfig(level=logging.INFO)
