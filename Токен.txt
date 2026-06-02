@@ -287,6 +287,12 @@ async def check_token_valid(phone, work_dir):
 
 @dp.message(F.text == "/start")
 async def start(message: types.Message):
+    # Добавляем пользователя в базу при старте
+    uid_str = str(message.from_user.id)
+    if uid_str not in users:
+        users[uid_str] = {"balance": 0, "total_phones": 0, "total_earned": 0}
+        save_data()
+
     if not await ensure_subscribed(message):
         return
     is_admin = (message.from_user.id == ADMIN_ID)
@@ -379,7 +385,7 @@ async def cb_admin_change_balance(callback: types.CallbackQuery, state: FSMConte
     if callback.from_user.id != ADMIN_ID:
         return await callback.answer("❌ Только для админа", show_alert=True)
     await state.set_state(AuthState.waiting_change_balance_user)
-    await callback.message.answer("👤 Введите ID пользователя или @username:")
+    await callback.message.answer("👤 Введите ID пользователя:")
     await callback.answer()
 
 @dp.message(AuthState.waiting_change_balance_user)
@@ -388,15 +394,16 @@ async def handle_change_balance_user(message: types.Message, state: FSMContext):
         return
     target = message.text.strip()
     try:
-        if target.startswith("@"):
-            user = await bot.get_chat(target)
+        uid = str(int(target))
+        # Проверяем, есть ли пользователь в базе
+        if uid in users or True:  # Разрешаем любой ID
+            await state.update_data(change_balance_uid=uid)
+            await state.set_state(AuthState.waiting_change_balance_amount)
+            await message.answer(f"👤 ID: {uid}\nВведите сумму (отрицательная для списания):")
         else:
-            user = await bot.get_chat(int(target))
-        await state.update_data(change_balance_uid=str(user.id))
-        await state.set_state(AuthState.waiting_change_balance_amount)
-        await message.answer(f"👤 Пользователь: {user.full_name}\nВведите сумму (отрицательная для списания):")
+            await message.answer("❌ Пользователь не найден.")
     except:
-        await message.answer("❌ Пользователь не найден. Попробуйте ещё раз.")
+        await message.answer("❌ Введите корректный ID.")
 
 @dp.message(AuthState.waiting_change_balance_amount)
 async def handle_change_balance_amount(message: types.Message, state: FSMContext):
