@@ -397,8 +397,14 @@ async def withdraw_amount(message: types.Message, state: FSMContext):
         else:
             await message.answer(f"✅ Чек на <b>${amount}</b> создан! Проверьте в @CryptoBot", parse_mode="HTML")
     else:
-        error = result.get("error", "Неизвестная ошибка") if result else "Нет ответа"
-        await message.answer(f"❌ Ошибка: {error}")
+        error = result.get("error", {}) if result else {}
+        error_name = error.get("name", "") if isinstance(error, dict) else ""
+        
+        if error_name == "NOT_ENOUGH_COINS":
+            await message.answer("🏦 Казна бота пока что пуста, попробуйте позже.")
+        else:
+            error_text = error.get("name", "Неизвестная ошибка") if isinstance(error, dict) else str(error)
+            await message.answer(f"❌ Ошибка: {error_text}")
 
     await state.clear()
 
@@ -940,4 +946,4 @@ async def main():
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    asyncio.run(mai
