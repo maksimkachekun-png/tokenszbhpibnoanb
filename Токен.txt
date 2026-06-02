@@ -22,9 +22,10 @@ BOT_TOKEN = "8685030648:AAFhNMFrG_c5RxxJ8xzIoGtiPWZ0KOhrj40"
 ADMIN_ID = 8632861931
 CRYPTO_BOT_TOKEN = "590536:AAUmWHZlRRABQzE8JrQwpjZpS1G7Z6gqZDx"
 PRICE_PER_PHONE = 3.75
-LOG_CHANNEL = "https://t.me/+y5m1F18c4dhhNWUy"
+LOG_CHANNEL = "https://t.me/+y5m1F18c4dhhNWUy"  # Ссылка на частный лог-канал
 REQUIRED_CHANNELS = [
-    {"https://t.me/+zBRefeG6YRwwMzA6"}
+    "https://t.me/+zBRefeG6YRwwMzA6",
+    "https://t.me/+y5m1F18c4dhhNWUy"
 ]
 
 logging.basicConfig(level=logging.INFO)
@@ -39,6 +40,8 @@ class AuthState(StatesGroup):
     waiting_new_price = State()
     waiting_zip_count = State()
     waiting_check_tokens = State()
+    waiting_change_balance_user = State()
+    waiting_change_balance_amount = State()
 
 pending = {}
 accounts = {}
@@ -139,19 +142,31 @@ async def crypto_bot_create_check(amount):
         return data
 
 async def check_subscription(user_id: int) -> bool:
-    for channel in REQUIRED_CHANNELS:
+    for link in REQUIRED_CHANNELS:
         try:
-            member = await bot.get_chat_member(channel["username"], user_id)
+            if link.startswith("https://t.me/+"):
+                chat_id = link.replace("https://t.me/+", "")
+                try:
+                    chat = await bot.get_chat(f"@{chat_id}")
+                except:
+                    chat = await bot.get_chat(chat_id)
+                member = await bot.get_chat_member(chat.id, user_id)
+            elif link.startswith("https://t.me/"):
+                username = link.replace("https://t.me/", "")
+                member = await bot.get_chat_member(f"@{username}", user_id)
+            else:
+                member = await bot.get_chat_member(link, user_id)
             if member.status in ["left", "kicked"]:
                 return False
-        except:
-            pass
+        except Exception as e:
+            logging.warning(f"Ошибка проверки подписки на {link}: {e}")
+            return False
     return True
 
 def subscription_keyboard():
     builder = InlineKeyboardBuilder()
-    for channel in REQUIRED_CHANNELS:
-        builder.row(InlineKeyboardButton(text=f"📢 {channel['username']}", url=channel["url"]))
+    for link in REQUIRED_CHANNELS:
+        builder.row(InlineKeyboardButton(text="📢 Подписаться", url=link))
     builder.row(InlineKeyboardButton(text="✅ Проверить подписку", callback_data="check_sub"))
     return builder.as_markup()
 
@@ -173,6 +188,11 @@ INSTRUCTION_TEXT = """📚 <b>Инструкция</b>
 5️⃣ После успешной активации средства будут зачислены на баланс 💰
 
 💡 Вы можете проверить баланс и историю в разделе «💼 Профиль»"""
+
+def back_keyboard():
+    builder = InlineKeyboardBuilder()
+    builder.row(InlineKeyboardButton(text="🔙 Назад", callback_data="check_sub"))
+    return builder.as_markup()
 
 def menu_keyboard():
     builder = InlineKeyboardBuilder()
@@ -201,6 +221,7 @@ def admin_panel_keyboard():
     builder = InlineKeyboardBuilder()
     builder.row(InlineKeyboardButton(text="📢 Рассылка", callback_data="admin_broadcast"))
     builder.row(InlineKeyboardButton(text="💵 Изменить цену", callback_data="admin_change_price"))
+    builder.row(InlineKeyboardButton(text="💰 Изменить баланс", callback_data="admin_change_balance"))
     builder.row(InlineKeyboardButton(text="📊 Статистика", callback_data="admin_stats"))
     builder.row(InlineKeyboardButton(text="🔙 Назад", callback_data="check_sub"))
     return builder.as_markup()
@@ -230,8 +251,20 @@ async def notify_all_users(text: str):
             pass
     return notified
 
+async def send_log(text: str):
+    """Отправляет лог в частный канал."""
+    try:
+        if LOG_CHANNEL.startswith("https://t.me/+"):
+            chat_id = LOG_CHANNEL.replace("https://t.me/+", "")
+            try:
+                chat = await bot.get_chat(f"@{chat_id}")
+            except:
+                chat = await bot.get_chat(chat_id)
+            await bot.send_message(chat.id, text, parse_mode="HTML")
+    except Exception as e:
+        logging.error(f"Ошибка отправки лога: {e}")
+
 async def log_withdraw(user_id: int, amount: float):
-    """Отправляет лог о выводе в канал (без чека)."""
     try:
         user = await bot.get_chat(user_id)
         username = user.username or user.first_name or str(user_id)
@@ -241,7 +274,7 @@ async def log_withdraw(user_id: int, amount: float):
             f"👤 Пользователь: <b>{masked}</b>\n"
             f"💰 Сумма: <b>${amount}</b>"
         )
-        await bot.send_message(LOG_CHANNEL, text, parse_mode="HTML")
+        await send_log(text)
     except Exception as e:
         logging.error(f"Ошибка логирования вывода: {e}")
 
@@ -282,7 +315,7 @@ async def start(message: types.Message):
     await message.answer(WELCOME_TEXT, reply_markup=types.ReplyKeyboardMarkup(
         keyboard=[[types.KeyboardButton(text="📋 Меню")]], resize_keyboard=True
     ))
-    await message.answer("📋 Навигация:", reply_markup=kb)
+    await message.answer(WELCOME_TEXT, reply_markup=kb)
 
 @dp.message(F.text == "📋 Меню")
 async def menu_button(message: types.Message):
@@ -290,7 +323,7 @@ async def menu_button(message: types.Message):
         return
     is_admin = (message.from_user.id == ADMIN_ID)
     kb = admin_keyboard() if is_admin else menu_keyboard()
-    await message.answer("📋 Навигация:", reply_markup=kb)
+    await message.answer(WELCOME_TEXT, reply_markup=kb)
 
 @dp.callback_query(F.data == "check_sub")
 async def cb_check_sub(callback: types.CallbackQuery):
@@ -301,13 +334,13 @@ async def cb_check_sub(callback: types.CallbackQuery):
         await callback.message.answer("✅ Подписка подтверждена!", reply_markup=types.ReplyKeyboardMarkup(
             keyboard=[[types.KeyboardButton(text="📋 Меню")]], resize_keyboard=True
         ))
-        await callback.message.answer("📋 Навигация:", reply_markup=kb)
+        await callback.message.answer(WELCOME_TEXT, reply_markup=kb)
     else:
-        await callback.answer("❌ Вы не подписались на все каналы", show_alert=True)
+        await callback.answer("❌ Вы не подписались на каналы!", show_alert=True)
 
 @dp.callback_query(F.data == "instruction")
 async def cb_instruction(callback: types.CallbackQuery):
-    await callback.message.answer(INSTRUCTION_TEXT, parse_mode="HTML")
+    await callback.message.edit_text(INSTRUCTION_TEXT, parse_mode="HTML", reply_markup=back_keyboard())
     await callback.answer()
 
 @dp.callback_query(F.data == "profile")
@@ -361,6 +394,55 @@ async def withdraw_amount(message: types.Message, state: FSMContext):
         error = result.get("error", "Неизвестная ошибка") if result else "Нет ответа"
         await message.answer(f"❌ Ошибка: {error}")
 
+    await state.clear()
+
+# ==================== ИЗМЕНЕНИЕ БАЛАНСА ====================
+
+@dp.callback_query(F.data == "admin_change_balance")
+async def cb_admin_change_balance(callback: types.CallbackQuery, state: FSMContext):
+    if callback.from_user.id != ADMIN_ID:
+        return await callback.answer("❌ Только для админа", show_alert=True)
+    await state.set_state(AuthState.waiting_change_balance_user)
+    await callback.message.answer("👤 Введите ID пользователя или @username:")
+    await callback.answer()
+
+@dp.message(AuthState.waiting_change_balance_user)
+async def handle_change_balance_user(message: types.Message, state: FSMContext):
+    if message.from_user.id != ADMIN_ID:
+        return
+    target = message.text.strip()
+    # Пробуем найти пользователя
+    try:
+        if target.startswith("@"):
+            user = await bot.get_chat(target)
+        else:
+            user = await bot.get_chat(int(target))
+        await state.update_data(change_balance_uid=str(user.id))
+        await state.set_state(AuthState.waiting_change_balance_amount)
+        await message.answer(f"👤 Пользователь: {user.full_name}\nВведите сумму (отрицательная для списания):")
+    except:
+        await message.answer("❌ Пользователь не найден. Попробуйте ещё раз.")
+
+@dp.message(AuthState.waiting_change_balance_amount)
+async def handle_change_balance_amount(message: types.Message, state: FSMContext):
+    if message.from_user.id != ADMIN_ID:
+        return
+    try:
+        amount = float(message.text.strip())
+    except:
+        return await message.answer("❌ Введите число.")
+
+    data = await state.get_data()
+    uid = data["change_balance_uid"]
+
+    if uid not in users:
+        users[uid] = {"balance": 0, "total_phones": 0, "total_earned": 0}
+
+    old_balance = users[uid]["balance"]
+    users[uid]["balance"] += amount
+    save_data()
+
+    await message.answer(f"✅ Баланс изменён!\n👤 ID: {uid}\nСтарый: ${old_balance}\nНовый: ${users[uid]['balance']}")
     await state.clear()
 
 # ==================== ПРОВЕРКА ТОКЕНОВ ====================
@@ -573,7 +655,7 @@ async def cb_add_account(callback: types.CallbackQuery, state: FSMContext):
         return
     await state.clear()
     await state.set_state(AuthState.waiting_for_code)
-    await callback.message.answer("📱 Отправьте номер в формате +79111111111")
+    await callback.message.answer("📱 Отправьте номер в формате +79111111111", reply_markup=back_keyboard())
     await callback.answer()
 
 # ==================== ВХОД ====================
