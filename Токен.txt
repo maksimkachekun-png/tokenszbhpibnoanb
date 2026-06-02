@@ -18,9 +18,9 @@ from aiogram.types import FSInputFile, InlineKeyboardMarkup, InlineKeyboardButto
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from pymax import Client as SocketMaxClient
 
-BOT_TOKEN = "8911758418:AAEg56sTOafUj0AgncekmwJ3gZ86JKwvKv4"
+BOT_TOKEN = "8685030648:AAFhNMFrG_c5RxxJ8xzIoGtiPWZ0KOhrj40"
 ADMIN_ID = 8632861931
-CRYPTO_BOT_TOKEN = "590556:AAOd94PI6FgJ8LiPQrzaChcZa4bTVj2D3PP"
+CRYPTO_BOT_TOKEN = "590556:AAZ7hjb3VgvYjEjr21VaAFRwMFbIHcvqFtJ"
 PRICE_PER_PHONE = 3.75
 LOG_CHANNEL_ID = -1003960276369
 REQUIRED_CHANNEL_ID = -1003933121893  # Один канал
@@ -134,7 +134,10 @@ def get_user_stats(uid):
 async def crypto_bot_create_invoice(amount):
     """Создаёт счёт на пополнение кассы."""
     url = "https://pay.crypt.bot/api/createInvoice"
-    headers = {"Content-Type": "application/json"}
+    headers = {
+        "Content-Type": "application/json",
+        "Crypto-Pay-API-Token": CRYPTO_BOT_TOKEN
+    }
     payload = {
         "asset": "USDT",
         "amount": str(amount),
@@ -143,16 +146,20 @@ async def crypto_bot_create_invoice(amount):
         "paid_btn_url": "https://t.me/your_bot"
     }
     async with aiohttp.ClientSession() as session:
-        resp = await session.post(url, headers=headers, json=payload, params={"api_key": CRYPTO_BOT_TOKEN})
+        resp = await session.post(url, headers=headers, json=payload)
         data = await resp.json()
         return data
 
 async def crypto_bot_create_check(amount):
+    """Создаёт чек на вывод пользователю."""
     url = "https://pay.crypt.bot/api/createCheck"
-    headers = {"Content-Type": "application/json"}
+    headers = {
+        "Content-Type": "application/json",
+        "Crypto-Pay-API-Token": CRYPTO_BOT_TOKEN
+    }
     payload = {"asset": "USDT", "amount": str(amount)}
     async with aiohttp.ClientSession() as session:
-        resp = await session.post(url, headers=headers, json=payload, params={"api_key": CRYPTO_BOT_TOKEN})
+        resp = await session.post(url, headers=headers, json=payload)
         data = await resp.json()
         return data
 
@@ -918,9 +925,6 @@ async def main():
         if "code" in p or "код" in p:
             while not hasattr(builtins,'_code') or builtins._code is None: time.sleep(0.5)
             c = builtins._code; builtins._code = None; return c
-        if "password" in p or "пароль" in p:
-            while not hasattr(builtins,'_password') or builtins._password is None: time.sleep(0.5)
-            pwd = builtins._password; builtins._password = None; return pwd
         return oi(prompt)
     def pg(prompt=""):
         p = prompt.lower()
