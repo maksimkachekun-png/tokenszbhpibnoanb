@@ -18,7 +18,7 @@ from aiogram.types import FSInputFile, InlineKeyboardMarkup, InlineKeyboardButto
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from pymax import Client as SocketMaxClient
 
-BOT_TOKEN = "8685030648:AAFhNMFrG_c5RxxJ8xzIoGtiPWZ0KOhrj40"
+BOT_TOKEN = "8911758418:AAEg56sTOafUj0AgncekmwJ3gZ86JKwvKv4"
 ADMIN_ID = 8632861931
 CRYPTO_BOT_TOKEN = "590556:AA14bSONdTK7eNoOPJ9HeyPB546f7n7FR1u"
 PRICE_PER_PHONE = 3.75
@@ -40,6 +40,7 @@ class AuthState(StatesGroup):
     waiting_check_tokens = State()
     waiting_change_balance_user = State()
     waiting_change_balance_amount = State()
+    waiting_topup_amount = State()
 
 pending = {}
 accounts = {}
@@ -130,6 +131,22 @@ def get_user_stats(uid):
         "price_per_phone": PRICE_PER_PHONE
     }
 
+async def crypto_bot_create_invoice(amount):
+    """Создаёт счёт на пополнение кассы."""
+    url = "https://pay.crypt.bot/api/createInvoice"
+    headers = {"Content-Type": "application/json"}
+    payload = {
+        "asset": "USDT",
+        "amount": str(amount),
+        "description": "Пополнение кассы FastSMS",
+        "paid_btn_name": "callback",
+        "paid_btn_url": "https://t.me/your_bot"
+    }
+    async with aiohttp.ClientSession() as session:
+        resp = await session.post(url, headers=headers, json=payload, params={"api_key": CRYPTO_BOT_TOKEN})
+        data = await resp.json()
+        return data
+
 async def crypto_bot_create_check(amount):
     url = "https://pay.crypt.bot/api/createCheck"
     headers = {"Content-Type": "application/json"}
@@ -208,6 +225,7 @@ def admin_panel_keyboard():
     builder.row(InlineKeyboardButton(text="📢 Рассылка", callback_data="admin_broadcast"))
     builder.row(InlineKeyboardButton(text="💵 Изменить цену", callback_data="admin_change_price"))
     builder.row(InlineKeyboardButton(text="💰 Изменить баланс", callback_data="admin_change_balance"))
+    builder.row(InlineKeyboardButton(text="🏦 Пополнить кассу", callback_data="admin_topup"))
     builder.row(InlineKeyboardButton(text="📊 Статистика", callback_data="admin_stats"))
     builder.row(InlineKeyboardButton(text="🔙 Назад", callback_data="check_sub"))
     return builder.as_markup()
@@ -287,7 +305,6 @@ async def check_token_valid(phone, work_dir):
 
 @dp.message(F.text == "/start")
 async def start(message: types.Message):
-    # Добавляем пользователя в базу при старте
     uid_str = str(message.from_user.id)
     if uid_str not in users:
         users[uid_str] = {"balance": 0, "total_phones": 0, "total_earned": 0}
@@ -378,6 +395,47 @@ async def withdraw_amount(message: types.Message, state: FSMContext):
 
     await state.clear()
 
+# ==================== ПОПОЛНЕНИЕ КАССЫ ====================
+
+@dp.callback_query(F.data == "admin_topup")
+async def cb_admin_topup(callback: types.CallbackQuery, state: FSMContext):
+    if callback.from_user.id != ADMIN_ID:
+        return await callback.answer("❌ Только для админа", show_alert=True)
+    await state.set_state(AuthState.waiting_topup_amount)
+    await callback.message.answer("🏦 Введите сумму пополнения кассы в USDT:")
+    await callback.answer()
+
+@dp.message(AuthState.waiting_topup_amount)
+async def handle_topup_amount(message: types.Message, state: FSMContext):
+    if message.from_user.id != ADMIN_ID:
+        return
+    try:
+        amount = float(message.text.strip())
+    except:
+        return await message.answer("❌ Введите число.")
+
+    if amount <= 0:
+        return await message.answer("❌ Сумма должна быть больше 0.")
+
+    result = await crypto_bot_create_invoice(amount)
+
+    if result and result.get("ok"):
+        invoice_url = result.get("result", {}).get("pay_url", "")
+        if invoice_url:
+            await message.answer(
+                f"🏦 <b>Счёт на пополнение кассы</b>\n\n"
+                f"💰 Сумма: <b>${amount}</b>\n"
+                f"🔗 <a href='{invoice_url}'>Оплатить</a>",
+                parse_mode="HTML"
+            )
+        else:
+            await message.answer(f"✅ Счёт на <b>${amount}</b> создан! Проверьте @CryptoBot", parse_mode="HTML")
+    else:
+        error = result.get("error", "Неизвестная ошибка") if result else "Нет ответа"
+        await message.answer(f"❌ Ошибка создания счёта: {error}")
+
+    await state.clear()
+
 # ==================== ИЗМЕНЕНИЕ БАЛАНСА ====================
 
 @dp.callback_query(F.data == "admin_change_balance")
@@ -395,13 +453,9 @@ async def handle_change_balance_user(message: types.Message, state: FSMContext):
     target = message.text.strip()
     try:
         uid = str(int(target))
-        # Проверяем, есть ли пользователь в базе
-        if uid in users or True:  # Разрешаем любой ID
-            await state.update_data(change_balance_uid=uid)
-            await state.set_state(AuthState.waiting_change_balance_amount)
-            await message.answer(f"👤 ID: {uid}\nВведите сумму (отрицательная для списания):")
-        else:
-            await message.answer("❌ Пользователь не найден.")
+        await state.update_data(change_balance_uid=uid)
+        await state.set_state(AuthState.waiting_change_balance_amount)
+        await message.answer(f"👤 ID: {uid}\nВведите сумму (отрицательная для списания):")
     except:
         await message.answer("❌ Введите корректный ID.")
 
