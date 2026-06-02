@@ -24,8 +24,8 @@ CRYPTO_BOT_TOKEN = "590536:AAUmWHZlRRABQzE8JrQwpjZpS1G7Z6gqZDx"
 PRICE_PER_PHONE = 3.75
 LOG_CHANNEL_ID = -1003960276369
 REQUIRED_CHANNELS = [
-    {"chat_id": -1003933121893 },
-    {"chat_id": -1003960276369 }
+    -1003933121893,
+    -1003960276369
 ]
 
 logging.basicConfig(level=logging.INFO)
@@ -142,20 +142,20 @@ async def crypto_bot_create_check(amount):
         return data
 
 async def check_subscription(user_id: int) -> bool:
-    for channel in REQUIRED_CHANNELS:
+    for channel_id in REQUIRED_CHANNELS:
         try:
-            member = await bot.get_chat_member(channel["chat_id"], user_id)
+            member = await bot.get_chat_member(channel_id, user_id)
             if member.status in ["left", "kicked"]:
                 return False
         except Exception as e:
-            logging.warning(f"Ошибка проверки подписки: {e}")
+            logging.warning(f"Ошибка проверки подписки на {channel_id}: {e}")
             return False
     return True
 
 def subscription_keyboard():
     builder = InlineKeyboardBuilder()
-    for channel in REQUIRED_CHANNELS:
-        builder.row(InlineKeyboardButton(text="📢 Подписаться", url=channel["url"]))
+    builder.row(InlineKeyboardButton(text="📢 Подписаться на канал 1", url="https://t.me/+zBRefeG6YRwwMzA6"))
+    builder.row(InlineKeyboardButton(text="📢 Подписаться на канал 2", url="https://t.me/+другая_ссылка"))
     builder.row(InlineKeyboardButton(text="✅ Проверить подписку", callback_data="check_sub"))
     return builder.as_markup()
 
@@ -314,9 +314,6 @@ async def cb_check_sub(callback: types.CallbackQuery):
         await callback.message.delete()
         is_admin = (callback.from_user.id == ADMIN_ID)
         kb = admin_keyboard() if is_admin else menu_keyboard()
-        await callback.message.answer("✅ Подписка подтверждена!", reply_markup=types.ReplyKeyboardMarkup(
-            keyboard=[[types.KeyboardButton(text="📋 Меню")]], resize_keyboard=True
-        ))
         await callback.message.answer(get_welcome_text(), reply_markup=kb)
     else:
         await callback.answer("❌ Вы не подписались на каналы!", show_alert=True)
