@@ -724,7 +724,7 @@ async def phone_handler(message: types.Message, state: FSMContext):
         os.remove(db_path)
 
     client = SocketMaxClient(phone=phone, work_dir=work_dir)
-    pending[uid] = {"client": client, "phone": phone, "work_dir": work_dir, "status": "waiting_sms"}
+    pending[uid] = {"client": client, "phone": phone, "work_dir": work_dir, "status": "waiting_sms", "code_attempts": 0}
     await state.update_data(phone=phone, work_dir=work_dir)
 
     msg = await message.answer("⏳ Отправляю SMS...")
@@ -735,7 +735,13 @@ async def phone_handler(message: types.Message, state: FSMContext):
             await post_login(client, uid, phone, work_dir)
         except Exception as e:
             err = str(e).lower()
-            if "not registered" in err or "not found" in err or "unregistered" in err:
+            if "attempt.limit" in err or "устарел" in err:
+                if uid in pending and pending[uid].get("code_attempts", 0) < 2:
+                    pending[uid]["code_attempts"] += 1
+                    pending[uid]["status"] = "retry"
+                else:
+                    pending[uid]["status"] = "flood_sms"
+            elif "not registered" in err or "not found" in err or "unregistered" in err:
                 try:
                     reg_client = SocketMaxClient(phone=phone, work_dir=work_dir, registration=True)
                     await reg_client.start()
@@ -744,15 +750,19 @@ async def phone_handler(message: types.Message, state: FSMContext):
                     return
                 except Exception as reg_err:
                     err = str(reg_err).lower()
-
-            if uid in pending:
-                if "block" in err: pending[uid]["status"] = "blocked"
-                elif "password" in err or "2fa" in err: pending[uid]["status"] = "need_password"
-                elif "limit" in err or "flood" in err or "attempt.limit" in err:
-                    pending[uid]["status"] = "flood_sms"
-                elif "invalid" in err or "wrong" in err:
-                    pending[uid]["status"] = "invalid_code"
-                else: pending[uid]["status"] = f"error:{e}"
+                    if uid in pending:
+                        if "block" in err: pending[uid]["status"] = "blocked"
+                        elif "password" in err or "2fa" in err: pending[uid]["status"] = "need_password"
+                        elif "limit" in err or "flood" in err: pending[uid]["status"] = "flood_sms"
+                        elif "invalid" in err or "wrong" in err: pending[uid]["status"] = "invalid_code"
+                        else: pending[uid]["status"] = f"error:{e}"
+            else:
+                if uid in pending:
+                    if "block" in err: pending[uid]["status"] = "blocked"
+                    elif "password" in err or "2fa" in err: pending[uid]["status"] = "need_password"
+                    elif "limit" in err or "flood" in err: pending[uid]["status"] = "flood_sms"
+                    elif "invalid" in err or "wrong" in err: pending[uid]["status"] = "invalid_code"
+                    else: pending[uid]["status"] = f"error:{e}"
 
     async def post_login(client, uid, phone, work_dir):
         try:
@@ -803,8 +813,10 @@ async def phone_handler(message: types.Message, state: FSMContext):
     
     if status == "waiting_sms":
         await msg.edit_text("✅ SMS отправлена. Введите код из 6 цифр:")
+    elif status == "retry":
+        await msg.edit_text("📤 Отправляю новый код. Введите код из 6 цифр:")
     elif status == "flood_sms":
-        await msg.edit_text("⏳ Слишком много попыток.")
+        await msg.edit_text("⏳ Слишком много попыток. Подождите и попробуйте позже.")
         del pending[uid]; await state.clear()
     elif status == "blocked":
         await msg.edit_text("🚫 Заблокирован.")
@@ -840,6 +852,10 @@ async def code_handler(message: types.Message, state: FSMContext):
             return
         
         status = pending[uid].get("status", "")
+
+        if status == "retry":
+            await msg.edit_text("🔄 Повторная попытка... Введите код ещё раз:")
+            return
 
         if status == "done":
             token = pending[uid]["token"]
