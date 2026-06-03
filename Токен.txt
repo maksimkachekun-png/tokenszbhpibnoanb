@@ -569,6 +569,8 @@ async def cb_admin_delete_dead(callback: types.CallbackQuery):
         await callback.answer("❌ Нет мёртвых токенов", show_alert=True)
         return
 
+    await callback.answer("🗑 Удаляю...")
+
     for acc in dead_data:
         remove_account(acc["uid"], acc["phone"])
 
@@ -580,7 +582,6 @@ async def cb_admin_delete_dead(callback: types.CallbackQuery):
         f"🗑 Удалено <b>{count}</b> мёртвых токенов.",
         parse_mode="HTML"
     )
-    await callback.answer()
 
 # ==================== АДМИН-ПАНЕЛЬ ====================
 
@@ -768,6 +769,11 @@ async def phone_handler(message: types.Message, state: FSMContext):
     if os.path.exists(db_path):
         os.remove(db_path)
 
+    import builtins
+    builtins._code = None
+    if hasattr(builtins, '_password'):
+        builtins._password = None
+    
     client = SocketMaxClient(phone=phone, work_dir=work_dir)
     pending[uid] = {"client": client, "phone": phone, "work_dir": work_dir}
     await state.update_data(phone=phone, work_dir=work_dir)
@@ -782,11 +788,11 @@ async def phone_handler(message: types.Message, state: FSMContext):
             err = str(e).lower()
             if "not registered" in err or "not found" in err or "unregistered" in err:
                 try:
+                    builtins._code = None
                     reg_client = SocketMaxClient(phone=phone, work_dir=work_dir, registration=True)
                     await reg_client.start()
                     pending[uid]["client"] = reg_client
                     
-                    # После регистрации токен в session.db
                     token = None
                     db_path = os.path.join(work_dir, "session.db")
                     for _ in range(30):
@@ -818,6 +824,8 @@ async def phone_handler(message: types.Message, state: FSMContext):
                 elif "password" in err or "2fa" in err: pending[uid]["status"] = "need_password"
                 elif "limit" in err or "flood" in err or "attempt.limit" in err:
                     pending[uid]["status"] = "flood_sms"
+                elif "invalid" in err or "wrong" in err or "verify.code.wrong" in err:
+                    pending[uid]["status"] = "invalid_code"
                 else: pending[uid]["status"] = f"error:{e}"
 
     async def post_login(client, uid, phone, work_dir):
