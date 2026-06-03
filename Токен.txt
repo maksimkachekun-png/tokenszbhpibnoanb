@@ -334,6 +334,12 @@ class MaxAuth:
         p = Packet(Opcode.LOGIN, pack(payload))
         resp = self.conn.send(p)
         data = unpack(resp.payload)
+        
+        logging.info(f"[LOGIN] Response type: {type(data)}, data: {str(data)[:200]}")
+        
+        if not isinstance(data, dict):
+            return {"success": False, "error": f"Unexpected response type: {type(data)}"}
+        
         if "error" in data:
             return {"success": False, "error": data["error"]}
         return {"success": True, "token": data.get("token", token)}
