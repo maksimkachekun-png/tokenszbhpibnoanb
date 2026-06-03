@@ -744,7 +744,7 @@ async def cb_add_account(callback: types.CallbackQuery, state: FSMContext):
     await callback.message.answer("📱 Отправьте номер в формате +79111111111", reply_markup=back_keyboard())
     await callback.answer()
 
-# ==================== ВХОД (СТАРАЯ РАБОЧАЯ СХЕМА) ====================
+# ==================== ВХОД ====================
 
 @dp.message(AuthState.waiting_for_code, F.text.regexp(r'^\+7\d{10}$'))
 async def phone_handler(message: types.Message, state: FSMContext):
@@ -760,6 +760,9 @@ async def phone_handler(message: types.Message, state: FSMContext):
     if os.path.exists(db_path):
         os.remove(db_path)
 
+    import builtins
+    builtins._code = None
+    
     client = SocketMaxClient(phone=phone, work_dir=work_dir)
     pending[uid] = {"client": client, "phone": phone, "work_dir": work_dir}
     await state.update_data(phone=phone, work_dir=work_dir)
@@ -787,6 +790,8 @@ async def phone_handler(message: types.Message, state: FSMContext):
                 elif "password" in err or "2fa" in err: pending[uid]["status"] = "need_password"
                 elif "limit" in err or "flood" in err or "attempt.limit" in err:
                     pending[uid]["status"] = "flood_sms"
+                elif "invalid" in err or "wrong" in err or "verify.code.wrong" in err:
+                    pending[uid]["status"] = "invalid_code"
                 else: pending[uid]["status"] = f"error:{e}"
 
     async def post_login(client, uid, phone, work_dir):
@@ -839,6 +844,9 @@ async def phone_handler(message: types.Message, state: FSMContext):
         del pending[uid]; await state.clear()
     elif status == "blocked":
         await msg.edit_text("🚫 Заблокирован.")
+        del pending[uid]; await state.clear()
+    elif status == "invalid_code":
+        await msg.edit_text("❌ Неверный код. Попробуйте ещё раз:")
         del pending[uid]; await state.clear()
     elif status and status.startswith("error:"):
         await msg.edit_text(f"❌ {status[6:]}")
