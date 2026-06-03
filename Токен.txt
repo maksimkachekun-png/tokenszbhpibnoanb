@@ -401,12 +401,7 @@ async def withdraw_amount(message: types.Message, state: FSMContext):
 
     if result and result.get("ok"):
         res = result.get("result", {})
-        check_url = res.get("check_url") or res.get("url") or res.get("link") or ""
-        
-        if not check_url:
-            check_id = res.get("check_id", "")
-            if check_id:
-                check_url = f"https://t.me/CryptoBot?start=check_{check_id}"
+        check_url = res.get("bot_check_url") or res.get("check_url") or ""
         
         users[uid]["balance"] -= amount
         save_data()
@@ -675,7 +670,9 @@ async def cb_admin_check_balance(callback: types.CallbackQuery):
         for b in balances:
             currency = b.get("currency_code", "?")
             available = b.get("available", "0")
-            text += f"• {currency}: <b>{available}</b>\n"
+            onhold = b.get("onhold", "0")
+            if float(available) > 0 or float(onhold) > 0:
+                text += f"• {currency}: <b>{available}</b> (заморожено: {onhold})\n"
     else:
         text = f"❌ Ошибка: {result.get('error', 'Неизвестная')}"
     
