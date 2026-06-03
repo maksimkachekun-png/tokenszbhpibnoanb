@@ -114,7 +114,12 @@ def pack(data: dict) -> bytes:
     return msgpack.packb(data, use_bin_type=True)
 
 def unpack(data: bytes) -> dict:
-    return msgpack.unpackb(data, raw=False, strict_map_key=False)
+    try:
+        return msgpack.unpackb(data, raw=False, strict_map_key=False)
+    except Exception:
+        unpacker = msgpack.Unpacker(raw=False, strict_map_key=False)
+        unpacker.feed(data)
+        return next(unpacker)
 
 class MaxConnection:
     HOST = "api.oneme.ru"
@@ -141,6 +146,9 @@ class MaxConnection:
             self._sock = ctx.wrap_socket(plain, server_hostname=self.HOST)
             self._sock.settimeout(5)
             self._running = True
+            self._buffer = bytearray()
+            self._pending.clear()
+            self._responses.clear()
             threading.Thread(target=self._reader, daemon=True).start()
             return True
         except Exception as e:
@@ -1446,36 +1454,54 @@ async def handle_convert_count(message: types.Message, state: FSMContext):
     
     success = 0
     failed = 0
+    skipped = 0
     
-    for acc in selected:
+    for i, acc in enumerate(selected):
         phone = acc["phone"]
         token = acc.get("token", "")
         device_id = acc.get("device_id", str(uuid.uuid4()))
         
         if not token:
-            failed += 1
+            skipped += 1
             continue
         
-        result = await asyncio.to_thread(
-            convert_android_to_web, token, device_id, phone
-        )
+        try:
+            await msg.edit_text(f"🔄 Конвертирую <b>{i+1}/{count}</b> ({phone})...", parse_mode="HTML")
+        except:
+            pass
         
-        if result["success"] and result["web_token"]:
-            uid = acc["uid"]
-            if phone in accounts.get(uid, {}):
-                accounts[uid][phone]["web_token"] = result["web_token"]
-            success += 1
-        else:
+        converted = False
+        for attempt in range(3):
+            if attempt > 0:
+                logging.info(f"Retry {attempt+1} for {phone}")
+                await asyncio.sleep(2)
+            
+            result = await asyncio.to_thread(
+                convert_android_to_web, token, device_id, phone
+            )
+            
+            if result["success"] and result["web_token"]:
+                uid = acc["uid"]
+                if phone in accounts.get(uid, {}):
+                    accounts[uid][phone]["web_token"] = result["web_token"]
+                success += 1
+                converted = True
+                break
+            else:
+                logging.warning(f"Attempt {attempt+1} failed for {phone}: {result.get('error')}")
+        
+        if not converted:
             failed += 1
         
-        await asyncio.sleep(1)
+        await asyncio.sleep(3)
     
     save_data()
     
     text = (
         f"🔄 <b>Конвертация завершена!</b>\n\n"
         f"✅ Успешно: <b>{success}</b>\n"
-        f"❌ Ошибок: <b>{failed}</b>"
+        f"❌ Ошибок: <b>{failed}</b>\n"
+        f"⏭ Пропущено: <b>{skipped}</b>"
     )
     await msg.edit_text(text, parse_mode="HTML")
     await state.clear()
