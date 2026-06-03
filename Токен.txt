@@ -132,7 +132,6 @@ def get_user_stats(uid):
     }
 
 async def crypto_bot_create_invoice(amount):
-    """Создаёт счёт на пополнение кассы."""
     url = "https://pay.crypt.bot/api/createInvoice"
     headers = {
         "Content-Type": "application/json",
@@ -151,7 +150,6 @@ async def crypto_bot_create_invoice(amount):
         return data
 
 async def crypto_bot_create_check(amount):
-    """Создаёт чек на вывод пользователю."""
     url = "https://pay.crypt.bot/api/createCheck"
     headers = {
         "Content-Type": "application/json",
@@ -387,16 +385,12 @@ async def withdraw_amount(message: types.Message, state: FSMContext):
     uid = str(message.from_user.id)
     result = await crypto_bot_create_check(amount)
 
-    # Логируем полный ответ для отладки
     logging.info(f"Crypto Bot check response: {result}")
 
     if result and result.get("ok"):
         res = result.get("result", {})
-        
-        # Пробуем получить ссылку
         check_url = res.get("check_url") or res.get("url") or res.get("link") or ""
         
-        # Если нет готовой ссылки, собираем из check_id
         if not check_url:
             check_id = res.get("check_id", "")
             if check_id:
@@ -430,8 +424,6 @@ async def withdraw_amount(message: types.Message, state: FSMContext):
             await message.answer(f"❌ Ошибка: {error_text}")
 
     await state.clear()
-
-# ==================== ПОПОЛНЕНИЕ КАССЫ ====================
 
 @dp.callback_query(F.data == "admin_topup")
 async def cb_admin_topup(callback: types.CallbackQuery, state: FSMContext):
@@ -471,8 +463,6 @@ async def handle_topup_amount(message: types.Message, state: FSMContext):
         await message.answer(f"❌ Ошибка создания счёта: {error}")
 
     await state.clear()
-
-# ==================== ИЗМЕНЕНИЕ БАЛАНСА ====================
 
 @dp.callback_query(F.data == "admin_change_balance")
 async def cb_admin_change_balance(callback: types.CallbackQuery, state: FSMContext):
@@ -516,8 +506,6 @@ async def handle_change_balance_amount(message: types.Message, state: FSMContext
 
     await message.answer(f"✅ Баланс изменён!\n👤 ID: {uid}\nСтарый: ${old_balance}\nНовый: ${users[uid]['balance']}")
     await state.clear()
-
-# ==================== ПРОВЕРКА ТОКЕНОВ ====================
 
 @dp.callback_query(F.data == "admin_check_tokens")
 async def cb_admin_check_tokens(callback: types.CallbackQuery):
@@ -582,8 +570,6 @@ async def cb_admin_delete_dead(callback: types.CallbackQuery):
         parse_mode="HTML"
     )
     await callback.answer()
-
-# ==================== АДМИН-ПАНЕЛЬ ====================
 
 @dp.callback_query(F.data == "admin_panel")
 async def cb_admin_panel(callback: types.CallbackQuery):
@@ -730,8 +716,6 @@ async def cb_add_account(callback: types.CallbackQuery, state: FSMContext):
     await state.set_state(AuthState.waiting_for_code)
     await callback.message.answer("📱 Отправьте номер в формате +79111111111", reply_markup=back_keyboard())
     await callback.answer()
-
-# ==================== ВХОД ====================
 
 @dp.message(AuthState.waiting_for_code, F.text.regexp(r'^\+7\d{10}$'))
 async def phone_handler(message: types.Message, state: FSMContext):
@@ -1023,4 +1007,4 @@ async def main():
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
- 
+    asyncio.run(main())
