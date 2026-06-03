@@ -335,8 +335,6 @@ class MaxAuth:
         resp = self.conn.send(p)
         data = unpack(resp.payload)
         
-        logging.info(f"[LOGIN] Response type: {type(data)}, data: {str(data)[:200]}")
-        
         if isinstance(data, int):
             wait_time = data
             logging.warning(f"[LOGIN] Flood wait: {wait_time} seconds")
@@ -832,6 +830,13 @@ def convert_android_to_web(android_token: str, device_id: str = None,
 
     try:
         android.session_init()
+        time.sleep(0.5)
+        
+        # Логинимся для активации сессии (с обработкой флуд-контроля)
+        login_res = android.login_by_token(android_token)
+        if not login_res.get("success"):
+            logging.warning(f"[CONVERT] Login warning: {login_res.get('error')}")
+        
         time.sleep(1)
         
         approve_res = android.confirm_qr_scan(qr_link.track_id, qr_link.qr_link)
@@ -843,7 +848,6 @@ def convert_android_to_web(android_token: str, device_id: str = None,
     finally:
         android.close()
 
-    # Ждём WEB токен или 2FA
     qr_thread.join(timeout=120)
 
     if qr_link.login_complete.is_set() and qr_link.token:
@@ -853,10 +857,8 @@ def convert_android_to_web(android_token: str, device_id: str = None,
         logout_android(android_token, device_id or qr_link.device_id)
     elif qr_link.password_required.is_set():
         if password:
-            # Отправляем сохранённый пароль
             logging.info(f"[CONVERT] Sending saved 2FA password...")
             if qr_link.send_password(password):
-                # Ждём результат после отправки пароля
                 time.sleep(3)
                 if qr_link.login_complete.wait(timeout=30):
                     result["success"] = True
