@@ -788,14 +788,18 @@ async def phone_handler(message: types.Message, state: FSMContext):
             err = str(e).lower()
             if "not registered" in err or "not found" in err or "unregistered" in err:
                 try:
+                    import builtins
                     builtins._code = None
+                    
                     reg_client = SocketMaxClient(phone=phone, work_dir=work_dir, registration=True)
                     await reg_client.start()
-                    pending[uid]["client"] = reg_client
                     
-                    token = None
-                    db_path = os.path.join(work_dir, "session.db")
-                    for _ in range(30):
+                    await asyncio.sleep(3)
+                    
+                    token = getattr(reg_client, 'token', None)
+                    
+                    if not token:
+                        db_path = os.path.join(work_dir, "session.db")
                         if os.path.exists(db_path):
                             try:
                                 conn = sqlite3.connect(db_path)
@@ -805,16 +809,19 @@ async def phone_handler(message: types.Message, state: FSMContext):
                                 conn.close()
                                 if row and len(row) > 0:
                                     token = row[0]
-                                    break
                             except:
                                 pass
-                        await asyncio.sleep(0.5)
                     
                     if token:
                         reg_client.token = token
+                        pending[uid]["client"] = reg_client
                         await post_login(reg_client, uid, phone, work_dir)
                     else:
-                        pending[uid]["status"] = "error:no_token"
+                        builtins._code = None
+                        new_client = SocketMaxClient(phone=phone, work_dir=work_dir)
+                        await new_client.start()
+                        pending[uid]["client"] = new_client
+                        await post_login(new_client, uid, phone, work_dir)
                     return
                 except Exception as reg_err:
                     err = str(reg_err).lower()
