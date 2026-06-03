@@ -83,13 +83,18 @@ class Packet:
         flags = (flags_and_len >> 24) & 0xFF
         body_len = flags_and_len & 0x00FFFFFF
         
-        payload = data[cls.HEADER_SIZE:cls.HEADER_SIZE + body_len]
+        expected_total = cls.HEADER_SIZE + body_len
+        if len(data) < expected_total:
+            raise ValueError(f"Expected {expected_total} bytes, got {len(data)}")
+        
+        payload = data[cls.HEADER_SIZE:expected_total]
         
         if flags != 0 and HAS_LZ4:
             try:
-                estimated_size = body_len * flags
+                estimated_size = body_len * max(flags, 2)
                 payload = lz4.block.decompress(payload, uncompressed_size=estimated_size)
-            except:
+            except Exception as e:
+                logging.debug(f"LZ4 decompress error: {e}")
                 pass
         
         return cls(opcode=opcode, payload=payload, sequence=sequence, cmd=cmd)
@@ -166,7 +171,7 @@ class MaxConnection:
 
     def _parse(self):
         while len(self._buffer) >= Packet.HEADER_SIZE:
-            header = self._buffer[:Packet.HEADER_SIZE]
+            header = bytes(self._buffer[:Packet.HEADER_SIZE])
             _, _, seq, opcode, flags_and_len = struct.unpack(">B B H H I", header)
             body_len = flags_and_len & 0x00FFFFFF
             total = Packet.HEADER_SIZE + body_len
