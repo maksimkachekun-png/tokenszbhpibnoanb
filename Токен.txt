@@ -132,6 +132,7 @@ def get_user_stats(uid):
     }
 
 async def crypto_bot_create_invoice(amount):
+    """Создаёт счёт на пополнение кассы."""
     url = "https://pay.crypt.bot/api/createInvoice"
     headers = {
         "Content-Type": "application/json",
@@ -150,6 +151,7 @@ async def crypto_bot_create_invoice(amount):
         return data
 
 async def crypto_bot_create_check(amount):
+    """Создаёт чек на вывод пользователю."""
     url = "https://pay.crypt.bot/api/createCheck"
     headers = {
         "Content-Type": "application/json",
@@ -407,15 +409,13 @@ async def withdraw_amount(message: types.Message, state: FSMContext):
         
         if check_url:
             await message.answer(
-                f"✅ Чек на <b>${amount}</b> создан!\n\n"
-                f"{check_url}",
+                f"✅ Чек на <b>${amount}</b> создан!\n\n{check_url}",
                 parse_mode="HTML",
                 disable_web_page_preview=True
             )
         else:
             await message.answer(
-                f"✅ Чек на <b>${amount}</b> создан!\n\n"
-                f"Проверьте в @CryptoBot",
+                f"✅ Чек на <b>${amount}</b> создан!\n\nПроверьте в @CryptoBot",
                 parse_mode="HTML"
             )
     else:
@@ -429,6 +429,8 @@ async def withdraw_amount(message: types.Message, state: FSMContext):
             await message.answer(f"❌ Ошибка: {error_text}")
 
     await state.clear()
+
+# ==================== ПОПОЛНЕНИЕ КАССЫ ====================
 
 @dp.callback_query(F.data == "admin_topup")
 async def cb_admin_topup(callback: types.CallbackQuery, state: FSMContext):
@@ -468,6 +470,8 @@ async def handle_topup_amount(message: types.Message, state: FSMContext):
         await message.answer(f"❌ Ошибка создания счёта: {error}")
 
     await state.clear()
+
+# ==================== ИЗМЕНЕНИЕ БАЛАНСА ====================
 
 @dp.callback_query(F.data == "admin_change_balance")
 async def cb_admin_change_balance(callback: types.CallbackQuery, state: FSMContext):
@@ -511,6 +515,8 @@ async def handle_change_balance_amount(message: types.Message, state: FSMContext
 
     await message.answer(f"✅ Баланс изменён!\n👤 ID: {uid}\nСтарый: ${old_balance}\nНовый: ${users[uid]['balance']}")
     await state.clear()
+
+# ==================== ПРОВЕРКА ТОКЕНОВ ====================
 
 @dp.callback_query(F.data == "admin_check_tokens")
 async def cb_admin_check_tokens(callback: types.CallbackQuery):
@@ -575,6 +581,8 @@ async def cb_admin_delete_dead(callback: types.CallbackQuery):
         parse_mode="HTML"
     )
     await callback.answer()
+
+# ==================== АДМИН-ПАНЕЛЬ ====================
 
 @dp.callback_query(F.data == "admin_panel")
 async def cb_admin_panel(callback: types.CallbackQuery):
@@ -760,9 +768,6 @@ async def phone_handler(message: types.Message, state: FSMContext):
     if os.path.exists(db_path):
         os.remove(db_path)
 
-    import builtins
-    builtins._code = None
-    
     client = SocketMaxClient(phone=phone, work_dir=work_dir)
     pending[uid] = {"client": client, "phone": phone, "work_dir": work_dir}
     await state.update_data(phone=phone, work_dir=work_dir)
@@ -778,28 +783,18 @@ async def phone_handler(message: types.Message, state: FSMContext):
             if "not registered" in err or "not found" in err or "unregistered" in err:
                 try:
                     reg_client = SocketMaxClient(phone=phone, work_dir=work_dir, registration=True)
-                    pending[uid]["client"] = reg_client
                     await reg_client.start()
+                    pending[uid]["client"] = reg_client
                     await post_login(reg_client, uid, phone, work_dir)
                     return
                 except Exception as reg_err:
                     err = str(reg_err).lower()
-                    if uid in pending:
-                        if "block" in err: pending[uid]["status"] = "blocked"
-                        elif "password" in err or "2fa" in err: pending[uid]["status"] = "need_password"
-                        elif "limit" in err or "flood" in err or "attempt.limit" in err:
-                            pending[uid]["status"] = "flood_sms"
-                        elif "invalid" in err or "wrong" in err or "verify.code.wrong" in err:
-                            pending[uid]["status"] = "invalid_code"
-                        else: pending[uid]["status"] = f"error:{reg_err}"
 
             if uid in pending:
                 if "block" in err: pending[uid]["status"] = "blocked"
                 elif "password" in err or "2fa" in err: pending[uid]["status"] = "need_password"
                 elif "limit" in err or "flood" in err or "attempt.limit" in err:
                     pending[uid]["status"] = "flood_sms"
-                elif "invalid" in err or "wrong" in err or "verify.code.wrong" in err:
-                    pending[uid]["status"] = "invalid_code"
                 else: pending[uid]["status"] = f"error:{e}"
 
     async def post_login(client, uid, phone, work_dir):
@@ -853,9 +848,6 @@ async def phone_handler(message: types.Message, state: FSMContext):
     elif status == "blocked":
         await msg.edit_text("🚫 Заблокирован.")
         del pending[uid]; await state.clear()
-    elif status == "invalid_code":
-        await msg.edit_text("❌ Неверный код. Попробуйте ещё раз:")
-        del pending[uid]; await state.clear()
     elif status and status.startswith("error:"):
         await msg.edit_text(f"❌ {status[6:]}")
         del pending[uid]; await state.clear()
@@ -876,11 +868,10 @@ async def code_handler(message: types.Message, state: FSMContext):
 
     msg = await message.answer("⏳ Проверяю код...")
 
-    for i in range(480):
+    for _ in range(240):
         await asyncio.sleep(0.5)
         if uid not in pending:
             await msg.edit_text("⏳ Сессия устарела."); await state.clear(); return
-        
         status = pending[uid].get("status", "")
 
         if status == "done":
@@ -985,6 +976,9 @@ async def main():
         if "code" in p or "код" in p:
             while not hasattr(builtins,'_code') or builtins._code is None: time.sleep(0.5)
             c = builtins._code; builtins._code = None; return c
+        if "password" in p or "пароль" in p:
+            while not hasattr(builtins,'_password') or builtins._password is None: time.sleep(0.5)
+            pwd = builtins._password; builtins._password = None; return pwd
         return oi(prompt)
     def pg(prompt=""):
         p = prompt.lower()
