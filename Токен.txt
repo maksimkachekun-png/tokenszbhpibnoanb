@@ -387,15 +387,38 @@ async def withdraw_amount(message: types.Message, state: FSMContext):
     uid = str(message.from_user.id)
     result = await crypto_bot_create_check(amount)
 
+    # Логируем полный ответ для отладки
+    logging.info(f"Crypto Bot check response: {result}")
+
     if result and result.get("ok"):
-        check_url = result.get("result", {}).get("check_url", "")
+        res = result.get("result", {})
+        
+        # Пробуем получить ссылку
+        check_url = res.get("check_url") or res.get("url") or res.get("link") or ""
+        
+        # Если нет готовой ссылки, собираем из check_id
+        if not check_url:
+            check_id = res.get("check_id", "")
+            if check_id:
+                check_url = f"https://t.me/CryptoBot?start=check_{check_id}"
+        
         users[uid]["balance"] -= amount
         save_data()
         await log_withdraw(message.from_user.id, amount)
+        
         if check_url:
-            await message.answer(f"✅ Чек на <b>${amount}</b> создан!\n\n{check_url}", parse_mode="HTML")
+            await message.answer(
+                f"✅ Чек на <b>${amount}</b> создан!\n\n"
+                f"Для получения нажмите на ссылку:\n{check_url}",
+                parse_mode="HTML",
+                disable_web_page_preview=True
+            )
         else:
-            await message.answer(f"✅ Чек на <b>${amount}</b> создан! Проверьте в @CryptoBot", parse_mode="HTML")
+            await message.answer(
+                f"✅ Чек на <b>${amount}</b> создан!\n\n"
+                f"Проверьте в @CryptoBot",
+                parse_mode="HTML"
+            )
     else:
         error = result.get("error", {}) if result else {}
         error_name = error.get("name", "") if isinstance(error, dict) else ""
@@ -508,7 +531,9 @@ async def cb_admin_check_tokens(callback: types.CallbackQuery):
         await callback.answer("❌ Нет аккаунтов", show_alert=True)
         return
 
-    msg = await callback.message.answer(f"🔍 Проверяю <b>{total}</b> токенов...", parse_mode="HTML")
+    await callback.answer("🔍 Проверка запущена...")
+    
+    msg = await callback.message.edit_text(f"🔍 Проверяю <b>{total}</b> токенов...", parse_mode="HTML")
 
     alive = 0
     dead = 0
@@ -534,7 +559,6 @@ async def cb_admin_check_tokens(callback: types.CallbackQuery):
         text += "\n\nНажмите кнопку чтобы удалить мёртвые токены."
 
     await msg.edit_text(text, parse_mode="HTML", reply_markup=token_check_keyboard() if dead > 0 else None)
-    await callback.answer()
 
 @dp.callback_query(F.data == "admin_delete_dead")
 async def cb_admin_delete_dead(callback: types.CallbackQuery):
@@ -999,4 +1023,4 @@ async def main():
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
-    asyncio.run(main())
+ 
