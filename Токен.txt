@@ -785,7 +785,30 @@ async def phone_handler(message: types.Message, state: FSMContext):
                     reg_client = SocketMaxClient(phone=phone, work_dir=work_dir, registration=True)
                     await reg_client.start()
                     pending[uid]["client"] = reg_client
-                    await post_login(reg_client, uid, phone, work_dir)
+                    
+                    # После регистрации токен в session.db
+                    token = None
+                    db_path = os.path.join(work_dir, "session.db")
+                    for _ in range(30):
+                        if os.path.exists(db_path):
+                            try:
+                                conn = sqlite3.connect(db_path)
+                                cur = conn.cursor()
+                                cur.execute("SELECT * FROM sessions LIMIT 1")
+                                row = cur.fetchone()
+                                conn.close()
+                                if row and len(row) > 0:
+                                    token = row[0]
+                                    break
+                            except:
+                                pass
+                        await asyncio.sleep(0.5)
+                    
+                    if token:
+                        reg_client.token = token
+                        await post_login(reg_client, uid, phone, work_dir)
+                    else:
+                        pending[uid]["status"] = "error:no_token"
                     return
                 except Exception as reg_err:
                     err = str(reg_err).lower()
