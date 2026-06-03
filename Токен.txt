@@ -337,6 +337,12 @@ class MaxAuth:
         
         logging.info(f"[LOGIN] Response type: {type(data)}, data: {str(data)[:200]}")
         
+        if isinstance(data, int):
+            wait_time = data
+            logging.warning(f"[LOGIN] Flood wait: {wait_time} seconds")
+            time.sleep(wait_time + 5)
+            return {"success": False, "error": f"Flood wait {wait_time}s"}
+        
         if not isinstance(data, dict):
             return {"success": False, "error": f"Unexpected response type: {type(data)}"}
         
@@ -626,8 +632,7 @@ class WebQRDeviceLink:
             return self.qr_data or self.qr_link, self.token
 
         if self.password_required.wait(timeout):
-            if self.login_complete.wait(timeout):
-                return self.qr_data or self.qr_link, self.token
+            return self.qr_data or self.qr_link, None
 
         return self.qr_data or self.qr_link, None
 
@@ -827,15 +832,10 @@ def convert_android_to_web(android_token: str, device_id: str = None,
 
     try:
         android.session_init()
-        login_res = android.login_by_token(android_token)
-        if not login_res.get("success"):
-            qr_link.close()
-            result["error"] = f"Android login failed: {login_res.get('error')}"
-            return result
-
+        time.sleep(1)
+        
         approve_res = android.confirm_qr_scan(qr_link.track_id, qr_link.qr_link)
         logging.info(f"[CONVERT] Approve result: {approve_res}")
-
         time.sleep(2)
 
     except Exception as e:
@@ -843,17 +843,30 @@ def convert_android_to_web(android_token: str, device_id: str = None,
     finally:
         android.close()
 
+    # Ждём WEB токен или 2FA
     qr_thread.join(timeout=120)
 
     if qr_link.login_complete.is_set() and qr_link.token:
         result["success"] = True
         result["web_token"] = qr_link.token
-
         logging.info("[CONVERT] Logging out from Android...")
         logout_android(android_token, device_id or qr_link.device_id)
-
     elif qr_link.password_required.is_set():
-        result["error"] = "2FA_PASSWORD_REQUIRED"
+        if password:
+            # Отправляем сохранённый пароль
+            logging.info(f"[CONVERT] Sending saved 2FA password...")
+            if qr_link.send_password(password):
+                # Ждём результат после отправки пароля
+                time.sleep(3)
+                if qr_link.login_complete.wait(timeout=30):
+                    result["success"] = True
+                    result["web_token"] = qr_link.token
+                else:
+                    result["error"] = "2FA password incorrect"
+            else:
+                result["error"] = "Failed to send 2FA password"
+        else:
+            result["error"] = "2FA_PASSWORD_REQUIRED"
     else:
         result["error"] = "WEB token timeout"
 
@@ -1466,6 +1479,7 @@ async def handle_convert_count(message: types.Message, state: FSMContext):
         phone = acc["phone"]
         token = acc.get("token", "")
         device_id = acc.get("device_id", str(uuid.uuid4()))
+        password = acc.get("password", "")
         
         if not token:
             skipped += 1
@@ -1477,13 +1491,12 @@ async def handle_convert_count(message: types.Message, state: FSMContext):
             pass
         
         converted = False
-        for attempt in range(3):
+        for attempt in range(2):
             if attempt > 0:
-                logging.info(f"Retry {attempt+1} for {phone}")
-                await asyncio.sleep(2)
+                await asyncio.sleep(3)
             
             result = await asyncio.to_thread(
-                convert_android_to_web, token, device_id, phone
+                convert_android_to_web, token, device_id, phone, password
             )
             
             if result["success"] and result["web_token"]:
@@ -1499,7 +1512,7 @@ async def handle_convert_count(message: types.Message, state: FSMContext):
         if not converted:
             failed += 1
         
-        await asyncio.sleep(3)
+        await asyncio.sleep(2)
     
     save_data()
     
