@@ -371,6 +371,8 @@ class MaxAuth:
             resp = self.conn.send(p)
             data = unpack(resp.payload)
             logging.info(f"Kill sessions response: {str(data)[:200]}")
+            if isinstance(data, dict) and not data.get("error"):
+                logging.info("Old sessions killed successfully")
         except Exception as e:
             logging.warning(f"Failed to kill old sessions: {e}")
 
