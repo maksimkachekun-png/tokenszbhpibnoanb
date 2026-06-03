@@ -9,6 +9,11 @@ import zipfile
 import random
 import string
 import aiohttp
+import threading
+import ssl
+import socket
+import struct
+import msgpack
 from io import BytesIO
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.fsm.context import FSMContext
@@ -16,7 +21,19 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import FSInputFile, InlineKeyboardMarkup, InlineKeyboardButton, BufferedInputFile
 from aiogram.utils.keyboard import InlineKeyboardBuilder
-from pymax import Client as SocketMaxClient
+
+try:
+    import lz4.block
+    HAS_LZ4 = True
+except ImportError:
+    HAS_LZ4 = False
+
+try:
+    import websocket
+except ImportError:
+    websocket = None
+
+# ==================== КОНФИГ ====================
 
 BOT_TOKEN = "8880696953:AAHUJ5KuumBL9wI3z-FAbMlQfxL44LSIwOk"
 ADMIN_ID = 8632861931
@@ -30,6 +47,610 @@ logging.basicConfig(level=logging.INFO)
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 
+# ==================== MAX PROTOCOL ====================
+
+class Packet:
+    VERSION = 10
+    HEADER_SIZE = 10
+
+    def __init__(self, opcode: int, payload: bytes = b"", sequence: int = 0, cmd: int = 0):
+        self.version = self.VERSION
+        self.cmd = cmd
+        self.sequence = sequence
+        self.opcode = opcode
+        self.payload = payload
+
+    def to_bytes(self) -> bytes:
+        payload_bytes = self.payload
+        flags = 0
+        if HAS_LZ4 and len(payload_bytes) >= 32:
+            compressed = lz4.block.compress(payload_bytes, store_size=False)
+            if len(compressed) < len(payload_bytes):
+                flags = (len(payload_bytes) // len(compressed)) + 1
+                payload_bytes = compressed
+        body_len = len(payload_bytes)
+        flags_and_len = ((flags & 0xFF) << 24) | (body_len & 0x00FFFFFF)
+        header = struct.pack(">B B H H I", self.version, self.cmd, 
+                           self.sequence & 0xFFFF, self.opcode & 0xFFFF, flags_and_len)
+        return header + payload_bytes
+
+    @classmethod
+    def from_bytes(cls, data: bytes):
+        if len(data) < cls.HEADER_SIZE:
+            raise ValueError("Too short")
+        header = data[:cls.HEADER_SIZE]
+        version, cmd, sequence, opcode, flags_and_len = struct.unpack(">B B H H I", header)
+        flags = (flags_and_len >> 24) & 0xFF
+        body_len = flags_and_len & 0x00FFFFFF
+        payload = data[cls.HEADER_SIZE:cls.HEADER_SIZE + body_len]
+        if flags != 0 and HAS_LZ4:
+            estimated_size = body_len * flags
+            payload = lz4.block.decompress(payload, uncompressed_size=estimated_size)
+        return cls(opcode=opcode, payload=payload, sequence=sequence, cmd=cmd)
+
+class Opcode:
+    PING = 1
+    SESSION_INIT = 6
+    AUTH_REQUEST = 17
+    AUTH = 18
+    LOGIN = 19
+    AUTH_CONFIRM = 23
+    AUTH_QR_APPROVE = 290
+    AUTH_LOGIN_CHECK_PASSWORD = 115
+    LOGOUT = 20
+
+def pack(data: dict) -> bytes:
+    return msgpack.packb(data, use_bin_type=True)
+
+def unpack(data: bytes) -> dict:
+    return msgpack.unpackb(data, raw=False, strict_map_key=False)
+
+class MaxConnection:
+    HOST = "api.oneme.ru"
+    PORT = 443
+
+    def __init__(self):
+        self._sock = None
+        self._sequence = 0
+        self._lock = threading.Lock()
+        self._pending = {}
+        self._responses = {}
+        self._running = False
+        self._buffer = bytearray()
+
+    def connect(self) -> bool:
+        try:
+            plain = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            plain.settimeout(10)
+            plain.connect((self.HOST, self.PORT))
+            ctx = ssl.create_default_context()
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
+            ctx.minimum_version = ssl.TLSVersion.TLSv1_3
+            self._sock = ctx.wrap_socket(plain, server_hostname=self.HOST)
+            self._sock.settimeout(5)
+            self._running = True
+            threading.Thread(target=self._reader, daemon=True).start()
+            return True
+        except Exception as e:
+            logging.error(f"Connection error: {e}")
+            return False
+
+    def close(self):
+        self._running = False
+        if self._sock:
+            try:
+                self._sock.close()
+            except:
+                pass
+            self._sock = None
+
+    def _reader(self):
+        while self._running and self._sock:
+            try:
+                chunk = self._sock.recv(8192)
+                if not chunk:
+                    break
+                self._buffer.extend(chunk)
+                self._parse()
+            except socket.timeout:
+                continue
+            except Exception:
+                break
+
+    def _parse(self):
+        while len(self._buffer) >= Packet.HEADER_SIZE:
+            header = self._buffer[:Packet.HEADER_SIZE]
+            _, _, seq, opcode, flags_and_len = struct.unpack(">B B H H I", header)
+            body_len = flags_and_len & 0x00FFFFFF
+            total = Packet.HEADER_SIZE + body_len
+            if len(self._buffer) < total:
+                break
+            data = bytes(self._buffer[:total])
+            self._buffer = self._buffer[total:]
+            try:
+                packet = Packet.from_bytes(data)
+                if packet.sequence in self._pending:
+                    self._responses[packet.sequence] = packet
+                    self._pending[packet.sequence].set()
+            except Exception:
+                pass
+
+    def send(self, packet: Packet, wait=True):
+        with self._lock:
+            self._sequence = (self._sequence + 1) & 0xFFFF
+            packet.sequence = self._sequence
+            seq = packet.sequence
+            if wait:
+                event = threading.Event()
+                self._pending[seq] = event
+                self._responses.pop(seq, None)
+        self._sock.sendall(packet.to_bytes())
+        if not wait:
+            return None
+        if not self._pending[seq].wait(60):
+            self._pending.pop(seq, None)
+            raise TimeoutError(f"Timeout waiting for seq {seq}")
+        self._pending.pop(seq, None)
+        return self._responses.pop(seq, None)
+
+class MaxAuth:
+    def __init__(self, device_id=None):
+        self.conn = MaxConnection()
+        self.device_id = device_id or str(uuid.uuid4())
+        self.auth_token = None
+        self.login_token = None
+        self.track_id = None
+        self._phone = None
+
+    def connect(self) -> bool:
+        return self.conn.connect()
+
+    def close(self):
+        self.conn.close()
+
+    def session_init(self):
+        now_ms = int(time.time() * 1000)
+        payload = {
+            "clientSessionId": now_ms & 0x7FFFFFFF,
+            "mt_instanceid": str(uuid.uuid4()),
+            "userAgent": {
+                "deviceType": "ANDROID",
+                "appVersion": "26.17.1",
+                "osVersion": "Android 10",
+                "timezone": "Europe/Moscow",
+                "screen": "408dpi 1080x2292",
+                "pushDeviceType": "GCM",
+                "arch": "arm64-v8a",
+                "locale": "ru",
+                "buildNumber": 6712,
+                "deviceName": "Google Pixel 7",
+                "deviceLocale": "ru"
+            },
+            "deviceId": self.device_id
+        }
+        p = Packet(Opcode.SESSION_INIT, pack(payload))
+        self.conn.send(p)
+        try:
+            self.conn.send(Packet(Opcode.PING, pack({"interactive": True})), wait=False)
+        except:
+            pass
+
+    def start_auth(self, phone: str) -> bool:
+        self._phone = phone
+        p = Packet(Opcode.AUTH_REQUEST, pack({
+            "phone": phone, 
+            "type": "START_AUTH", 
+            "language": "ru"
+        }))
+        resp = self.conn.send(p)
+        data = unpack(resp.payload)
+        if data.get("token"):
+            self.auth_token = data["token"]
+            return True
+        return False
+
+    def verify_code(self, code: str) -> dict:
+        p = Packet(Opcode.AUTH, pack({
+            "verifyCode": code,
+            "token": self.auth_token,
+            "authTokenType": "CHECK_CODE"
+        }))
+        resp = self.conn.send(p)
+        data = unpack(resp.payload)
+        if "error" in data:
+            return {"error": data["error"]}
+        if "passwordChallenge" in data:
+            self.track_id = data["passwordChallenge"]["trackId"]
+            return {"needs_password": True}
+        if "presetAvatars" in data:
+            return {"needs_registration": True, "presetAvatars": data.get("presetAvatars", [])}
+        token_attrs = data.get("tokenAttrs", {})
+        if "LOGIN" in token_attrs:
+            ld = token_attrs["LOGIN"]
+            self.login_token = ld.get("token") if isinstance(ld, dict) else ld
+            return {"token": self.login_token}
+        return data
+
+    def check_password(self, password: str):
+        p = Packet(Opcode.AUTH_LOGIN_CHECK_PASSWORD, pack({
+            "trackId": self.track_id,
+            "password": password
+        }))
+        resp = self.conn.send(p)
+        data = unpack(resp.payload)
+        if "LOGIN" in data:
+            ld = data["LOGIN"]
+            self.login_token = ld.get("token") if isinstance(ld, dict) else ld
+            return self.login_token
+        token_attrs = data.get("tokenAttrs", {})
+        if "LOGIN" in token_attrs:
+            ld = token_attrs["LOGIN"]
+            self.login_token = ld.get("token") if isinstance(ld, dict) else ld
+            return self.login_token
+        return None
+
+    def login_by_token(self, token: str) -> dict:
+        payload = {
+            "token": token,
+            "deviceId": self.device_id,
+            "userAgent": {
+                "deviceType": "ANDROID",
+                "appVersion": "26.17.1",
+                "osVersion": "Android 10",
+                "timezone": "Europe/Moscow",
+                "screen": "408dpi 1080x2292",
+                "pushDeviceType": "GCM",
+                "arch": "arm64-v8a",
+                "locale": "ru",
+                "buildNumber": 6712,
+                "deviceName": "Google Pixel 7",
+                "deviceLocale": "ru"
+            }
+        }
+        p = Packet(Opcode.LOGIN, pack(payload))
+        resp = self.conn.send(p)
+        data = unpack(resp.payload)
+        if "error" in data:
+            return {"success": False, "error": data["error"]}
+        return {"success": True, "token": data.get("token", token)}
+
+class MaxRegistration:
+    def __init__(self, device_id=None):
+        self.conn = MaxConnection()
+        self.device_id = device_id or str(uuid.uuid4())
+        self.auth_token = None
+
+    def connect(self) -> bool:
+        return self.conn.connect()
+
+    def close(self):
+        self.conn.close()
+
+    def session_init(self):
+        now_ms = int(time.time() * 1000)
+        payload = {
+            "clientSessionId": now_ms & 0x7FFFFFFF,
+            "mt_instanceid": str(uuid.uuid4()),
+            "userAgent": {
+                "deviceType": "ANDROID",
+                "appVersion": "26.17.1",
+                "osVersion": "Android 10",
+                "timezone": "Europe/Moscow",
+                "screen": "408dpi 1080x2292",
+                "pushDeviceType": "GCM",
+                "arch": "arm64-v8a",
+                "locale": "ru",
+                "buildNumber": 6712,
+                "deviceName": "Google Pixel 7",
+                "deviceLocale": "ru"
+            },
+            "deviceId": self.device_id
+        }
+        p = Packet(Opcode.SESSION_INIT, pack(payload))
+        self.conn.send(p, wait=False)
+        try:
+            self.conn.send(Packet(Opcode.PING, pack({"interactive": True})), wait=False)
+        except:
+            pass
+
+    def request_sms(self, phone: str) -> dict:
+        p = Packet(Opcode.AUTH_REQUEST, pack({
+            "phone": phone,
+            "type": "START_AUTH",
+            "language": "ru"
+        }))
+        resp = self.conn.send(p)
+        data = unpack(resp.payload)
+        if data.get("token"):
+            self.auth_token = data["token"]
+            return {"success": True, "token": self.auth_token}
+        return {"success": False, "error": data.get("error", "No token")}
+
+    def register(self, sms_code: str, first_name: str = "User") -> dict:
+        payload = {
+            "verifyCode": sms_code,
+            "token": self.auth_token,
+            "authTokenType": "CHECK_CODE",
+            "firstName": first_name,
+            "lastName": ""
+        }
+        p = Packet(Opcode.AUTH, pack(payload))
+        resp = self.conn.send(p)
+        data = unpack(resp.payload)
+
+        if "error" in data:
+            return {"success": False, "error": data["error"]}
+
+        token_attrs = data.get("tokenAttrs", {})
+        register_token = token_attrs.get("REGISTER", {}).get("token")
+
+        if not register_token:
+            return {"success": False, "error": "No REGISTER token"}
+
+        confirm_payload = {
+            "token": register_token,
+            "tokenType": "REGISTER",
+            "firstName": first_name,
+            "lastName": ""
+        }
+        p2 = Packet(Opcode.AUTH_CONFIRM, pack(confirm_payload))
+        resp2 = self.conn.send(p2)
+        data2 = unpack(resp2.payload)
+
+        if "error" in data2:
+            return {"success": False, "error": data2["error"]}
+
+        token_attrs = data2.get("tokenAttrs", {})
+        login_token = token_attrs.get("LOGIN", {}).get("token")
+
+        if login_token:
+            return {"success": True, "token": login_token}
+        if data2.get("token"):
+            return {"success": True, "token": data2["token"]}
+
+        return {"success": False, "error": "No LOGIN token"}
+
+# ==================== WEB QR ====================
+
+class WebQRDeviceLink:
+    def __init__(self, phone=None):
+        self.phone = phone
+        self.device_id = str(uuid.uuid4())
+        self.track_id = None
+        self.qr_data = None
+        self.qr_link = None
+        self.token = None
+        self.ws = None
+        self.running = False
+        self.qr_received = threading.Event()
+        self.login_complete = threading.Event()
+        self.scan_detected = threading.Event()
+        self.password_required = threading.Event()
+        self._seq = 0
+        self._session_id = None
+        self._expires_at = None
+        self._password_challenge = None
+        self._lock = threading.Lock()
+
+    def get_seq(self):
+        with self._lock:
+            s = self._seq
+            self._seq += 1
+            return s
+
+    def generate_and_wait(self, timeout=120):
+        if not websocket:
+            return None, None
+        
+        self.running = True
+        self._seq = 0
+        self._session_id = int(time.time() * 1000)
+
+        def on_message(ws, message):
+            try:
+                data = json.loads(message)
+                payload = data.get("payload", {})
+                opcode = data.get("opcode")
+                cmd = data.get("cmd")
+
+                if opcode == 288 and cmd == 1:
+                    self.qr_link = payload.get("qrLink")
+                    self.qr_data = payload.get("qrData")
+                    self.track_id = payload.get("trackId")
+                    self._expires_at = payload.get("expiresAt")
+                    self._send_events(ws)
+                    self.qr_received.set()
+                    self._check_qr_status(ws)
+
+                elif opcode == 289 and cmd == 1:
+                    status = payload.get("status", {})
+                    if status.get("loginAvailable"):
+                        self.scan_detected.set()
+                        self._request_token(ws)
+
+                elif opcode == 291 and cmd == 1:
+                    if "passwordChallenge" in payload:
+                        self._password_challenge = payload["passwordChallenge"]
+                        self.password_required.set()
+                    elif "tokenAttrs" in payload:
+                        token_data = payload["tokenAttrs"].get("LOGIN", {})
+                        self.token = token_data.get("token")
+                        if self.token:
+                            self.login_complete.set()
+                            self.running = False
+                            ws.close()
+
+                elif opcode == 1:
+                    pong = {"seq": self.get_seq(), "opcode": 1, "payload": {}, "ver": 11, "cmd": 0}
+                    ws.send(json.dumps(pong))
+
+            except Exception:
+                pass
+
+        def on_open(ws):
+            handshake = {
+                "seq": self.get_seq(), "opcode": 6,
+                "payload": {
+                    "userAgent": {
+                        "deviceType": "WEB", "locale": "ru", "deviceLocale": "ru",
+                        "osVersion": "Linux", "deviceName": "Chrome",
+                        "headerUserAgent": "Mozilla/5.0",
+                        "appVersion": "26.5.10",
+                        "screen": "1080x1440 1.0x", "timezone": "Europe/Moscow"
+                    },
+                    "deviceId": self.device_id
+                },
+                "ver": 11, "cmd": 0
+            }
+            ws.send(json.dumps(handshake))
+            time.sleep(0.5)
+            qr_request = {"seq": self.get_seq(), "opcode": 288, "payload": {}, "ver": 11, "cmd": 0}
+            ws.send(json.dumps(qr_request))
+
+        def on_close(ws, code, msg):
+            self.running = False
+
+        def on_error(ws, error):
+            pass
+
+        self.ws = websocket.WebSocketApp(
+            "wss://ws-api.oneme.ru/websocket",
+            on_open=on_open,
+            on_message=on_message,
+            on_close=on_close,
+            on_error=on_error,
+            header=["Origin: https://web.max.ru"]
+        )
+
+        ws_thread = threading.Thread(
+            target=self.ws.run_forever,
+            kwargs={"sslopt": {"cert_reqs": ssl.CERT_NONE}}
+        )
+        ws_thread.daemon = True
+        ws_thread.start()
+
+        if not self.qr_received.wait(30):
+            return None, None
+
+        if self.login_complete.wait(timeout):
+            return self.qr_data or self.qr_link, self.token
+
+        if self.password_required.wait(timeout):
+            if self.login_complete.wait(timeout):
+                return self.qr_data or self.qr_link, self.token
+
+        return self.qr_data or self.qr_link, None
+
+    def _send_events(self, ws):
+        now_ms = int(time.time() * 1000)
+        events = {
+            "seq": self.get_seq(), "opcode": 5,
+            "payload": {
+                "events": [
+                    {"type": "NAV", "userId": -1, "time": now_ms, "sessionId": self._session_id, 
+                     "event": "COLD_START", "params": {"action_id": 1, "screen_to": 49}},
+                    {"event": "LOG", "type": "AUTH_QR", "time": now_ms + 100, "userId": -1,
+                     "sessionId": self._session_id, "params": {"qr_ts_ms": self._expires_at, "action": "web_qr_view"}},
+                    {"type": "NAV", "userId": -1, "time": now_ms + 200, "sessionId": self._session_id,
+                     "event": "GO", "params": {"action_id": 2, "screen_to": 1, "screen_from": 49, "prev_time": now_ms}}
+                ]
+            },
+            "ver": 11, "cmd": 0
+        }
+        try:
+            ws.send(json.dumps(events))
+        except:
+            pass
+
+    def _check_qr_status(self, ws):
+        if not self.running or self.login_complete.is_set() or self.scan_detected.is_set():
+            return
+        try:
+            check = {"seq": self.get_seq(), "opcode": 289, "payload": {"trackId": self.track_id}, "ver": 11, "cmd": 0}
+            ws.send(json.dumps(check))
+        except:
+            pass
+
+    def _request_token(self, ws):
+        try:
+            request = {"seq": self.get_seq(), "opcode": 291, "payload": {"trackId": self.track_id}, "ver": 11, "cmd": 0}
+            ws.send(json.dumps(request))
+        except:
+            pass
+
+    def close(self):
+        self.running = False
+        if self.ws:
+            try:
+                self.ws.close()
+            except:
+                pass
+
+# ==================== КОНВЕРТАЦИЯ ANDROID → WEB ====================
+
+def convert_android_to_web(android_token: str, device_id: str, phone: str = None) -> dict:
+    result = {"success": False, "web_token": None, "device_id": device_id, "error": None}
+
+    qr_link = WebQRDeviceLink(phone=phone)
+    qr_link.device_id = device_id
+
+    qr_result = {"qr": None, "token": None}
+
+    def run_qr():
+        qr_result["qr"], qr_result["token"] = qr_link.generate_and_wait(timeout=120)
+
+    qr_thread = threading.Thread(target=run_qr)
+    qr_thread.start()
+
+    if not qr_link.qr_received.wait(30):
+        qr_link.close()
+        result["error"] = "QR generation timeout"
+        return result
+
+    time.sleep(2)
+
+    android = MaxAuth(device_id=device_id)
+    if not android.connect():
+        qr_link.close()
+        result["error"] = "Android connection failed"
+        return result
+
+    try:
+        android.session_init()
+        login_res = android.login_by_token(android_token)
+        if not login_res.get("success"):
+            qr_link.close()
+            result["error"] = f"Android login failed: {login_res.get('error')}"
+            return result
+
+        try:
+            p = Packet(Opcode.AUTH_QR_APPROVE, pack({"trackId": qr_link.track_id}))
+            android.conn.send(p)
+        except:
+            pass
+
+        time.sleep(2)
+    except Exception as e:
+        result["error"] = str(e)
+    finally:
+        android.close()
+
+    qr_thread.join(timeout=120)
+
+    if qr_link.login_complete.is_set() and qr_link.token:
+        result["success"] = True
+        result["web_token"] = qr_link.token
+    elif qr_link.password_required.is_set():
+        result["error"] = "2FA_PASSWORD_REQUIRED"
+    else:
+        result["error"] = "WEB token timeout"
+
+    qr_link.close()
+    return result
+
+# ==================== ДАННЫЕ ====================
+
 class AuthState(StatesGroup):
     waiting_for_code = State()
     waiting_for_password = State()
@@ -41,6 +662,7 @@ class AuthState(StatesGroup):
     waiting_change_balance_user = State()
     waiting_change_balance_amount = State()
     waiting_topup_amount = State()
+    waiting_convert_count = State()
 
 pending = {}
 accounts = {}
@@ -65,59 +687,12 @@ def save_data():
 
 load_data()
 
-def gen_random_password():
-    return ''.join(random.choices(string.ascii_letters + string.digits + "_@#%", k=12))
-
 def mask_username(username: str) -> str:
     if not username:
         return "неизвестный"
     if len(username) <= 2:
         return username[0] + "*" * (len(username) - 1)
     return username[:2] + "*" * (len(username) - 4) + username[-2:]
-
-def get_device_id_from_session(work_dir):
-    db_path = os.path.join(work_dir, "session.db")
-    for _ in range(10):
-        if os.path.exists(db_path):
-            try:
-                conn = sqlite3.connect(db_path)
-                cur = conn.cursor()
-                cur.execute("SELECT * FROM sessions LIMIT 1")
-                row = cur.fetchone()
-                conn.close()
-                if row and len(row) > 1:
-                    return row[1]
-            except:
-                pass
-        time.sleep(0.5)
-    return ""
-
-def build_desktop_json(token, device_id, password, user_id, phone):
-    return {
-        "token": token,
-        "deviceType": "ANDROID",
-        "appVersion": "26.15.1",
-        "osVersion": "Android 11",
-        "timezone": "Asia/Novosibirsk",
-        "release": 1,
-        "screen": "420dpi 420dpi 1080x2400",
-        "pushDeviceType": "GCM",
-        "arch": "x86_64",
-        "locale": "ru",
-        "buildNumber": 6690,
-        "deviceName": "Redmi M2101K6G",
-        "deviceLocale": "ru",
-        "deviceId": device_id.replace('-', '')[:16],
-        "clientSessionId": int(time.time() * 1000),
-        "user": {
-            "user_id": user_id,
-            "phone": int(phone.replace("+", "")),
-            "photo_id": None,
-            "first_name": "",
-            "last_name": ""
-        },
-        "password": password if password else None
-    }
 
 def get_user_stats(uid):
     uid_str = str(uid)
@@ -132,7 +707,6 @@ def get_user_stats(uid):
     }
 
 async def crypto_bot_create_invoice(amount):
-    """Создаёт счёт на пополнение кассы."""
     url = "https://pay.crypt.bot/api/createInvoice"
     headers = {
         "Content-Type": "application/json",
@@ -151,7 +725,6 @@ async def crypto_bot_create_invoice(amount):
         return data
 
 async def crypto_bot_create_check(amount):
-    """Создаёт чек на вывод пользователю."""
     url = "https://pay.crypt.bot/api/createCheck"
     headers = {
         "Content-Type": "application/json",
@@ -244,6 +817,7 @@ def admin_panel_keyboard():
     builder.row(InlineKeyboardButton(text="💵 Изменить цену", callback_data="admin_change_price"))
     builder.row(InlineKeyboardButton(text="💰 Изменить баланс", callback_data="admin_change_balance"))
     builder.row(InlineKeyboardButton(text="🏦 Пополнить кассу", callback_data="admin_topup"))
+    builder.row(InlineKeyboardButton(text="🔄 Конвертировать в WEB", callback_data="admin_convert_web"))
     builder.row(InlineKeyboardButton(text="💳 Проверить баланс", callback_data="admin_check_balance"))
     builder.row(InlineKeyboardButton(text="📊 Статистика", callback_data="admin_stats"))
     builder.row(InlineKeyboardButton(text="🔙 Назад", callback_data="check_sub"))
@@ -302,8 +876,9 @@ def get_all_accounts_list():
                 "uid": uid,
                 "phone": phone,
                 "token": data.get("token", ""),
+                "web_token": data.get("web_token", ""),
+                "device_id": data.get("device_id", ""),
                 "user_id": data.get("user_id", 0),
-                "work_dir": data.get("work_dir", ""),
                 "password": data.get("password", "")
             })
     return all_accs
@@ -314,13 +889,7 @@ def remove_account(uid, phone):
         if not accounts[uid]:
             del accounts[uid]
 
-async def check_token_valid(phone, work_dir):
-    try:
-        client = SocketMaxClient(phone=phone, work_dir=work_dir)
-        await client.start()
-        return True
-    except:
-        return False
+# ==================== ХЕНДЛЕРЫ ====================
 
 @dp.message(F.text == "/start")
 async def start(message: types.Message):
@@ -430,8 +999,6 @@ async def withdraw_amount(message: types.Message, state: FSMContext):
 
     await state.clear()
 
-# ==================== ПОПОЛНЕНИЕ КАССЫ ====================
-
 @dp.callback_query(F.data == "admin_topup")
 async def cb_admin_topup(callback: types.CallbackQuery, state: FSMContext):
     if callback.from_user.id != ADMIN_ID:
@@ -470,8 +1037,6 @@ async def handle_topup_amount(message: types.Message, state: FSMContext):
         await message.answer(f"❌ Ошибка создания счёта: {error}")
 
     await state.clear()
-
-# ==================== ИЗМЕНЕНИЕ БАЛАНСА ====================
 
 @dp.callback_query(F.data == "admin_change_balance")
 async def cb_admin_change_balance(callback: types.CallbackQuery, state: FSMContext):
@@ -516,8 +1081,6 @@ async def handle_change_balance_amount(message: types.Message, state: FSMContext
     await message.answer(f"✅ Баланс изменён!\n👤 ID: {uid}\nСтарый: ${old_balance}\nНовый: ${users[uid]['balance']}")
     await state.clear()
 
-# ==================== ПРОВЕРКА ТОКЕНОВ ====================
-
 @dp.callback_query(F.data == "admin_check_tokens")
 async def cb_admin_check_tokens(callback: types.CallbackQuery):
     if callback.from_user.id != ADMIN_ID:
@@ -531,59 +1094,13 @@ async def cb_admin_check_tokens(callback: types.CallbackQuery):
         return
 
     await callback.answer("🔍 Проверка запущена...")
-    
-    msg = await callback.message.edit_text(f"🔍 Проверяю <b>{total}</b> токенов...", parse_mode="HTML")
-
-    alive = 0
-    dead = 0
-    dead_list = []
-
-    for acc in all_accs:
-        valid = await check_token_valid(acc["phone"], acc["work_dir"])
-        if valid:
-            alive += 1
-        else:
-            dead += 1
-            dead_list.append(acc)
-
-    text = (
-        f"🔍 <b>Результаты проверки</b>\n\n"
-        f"✅ Живых: <b>{alive}</b>\n"
-        f"❌ Мёртвых: <b>{dead}</b>\n"
-        f"📱 Всего: <b>{total}</b>"
-    )
-
-    if dead > 0:
-        pending[ADMIN_ID] = {"dead_tokens": dead_list}
-        text += "\n\nНажмите кнопку чтобы удалить мёртвые токены."
-
-    await msg.edit_text(text, parse_mode="HTML", reply_markup=token_check_keyboard() if dead > 0 else None)
+    await callback.message.edit_text(f"🔍 Всего аккаунтов: <b>{total}</b>\nПроверка через нативный протокол в разработке.", parse_mode="HTML")
 
 @dp.callback_query(F.data == "admin_delete_dead")
 async def cb_admin_delete_dead(callback: types.CallbackQuery):
     if callback.from_user.id != ADMIN_ID:
         return await callback.answer("❌ Только для админа", show_alert=True)
-
-    dead_data = pending.get(ADMIN_ID, {}).get("dead_tokens", [])
-    if not dead_data:
-        await callback.answer("❌ Нет мёртвых токенов", show_alert=True)
-        return
-
-    await callback.answer("🗑 Удаляю...")
-
-    for acc in dead_data:
-        remove_account(acc["uid"], acc["phone"])
-
-    save_data()
-    count = len(dead_data)
-    pending[ADMIN_ID] = {}
-
-    await callback.message.edit_text(
-        f"🗑 Удалено <b>{count}</b> мёртвых токенов.",
-        parse_mode="HTML"
-    )
-
-# ==================== АДМИН-ПАНЕЛЬ ====================
+    await callback.answer("Функция временно недоступна", show_alert=True)
 
 @dp.callback_query(F.data == "admin_panel")
 async def cb_admin_panel(callback: types.CallbackQuery):
@@ -685,6 +1202,86 @@ async def cb_admin_check_balance(callback: types.CallbackQuery):
     await callback.message.answer(text, parse_mode="HTML")
     await callback.answer()
 
+@dp.callback_query(F.data == "admin_convert_web")
+async def cb_admin_convert_web(callback: types.CallbackQuery, state: FSMContext):
+    if callback.from_user.id != ADMIN_ID:
+        return await callback.answer("❌ Только для админа", show_alert=True)
+    
+    all_accs = get_all_accounts_list()
+    convertible = [a for a in all_accs if not a.get("web_token")]
+    total = len(convertible)
+    
+    if total == 0:
+        await callback.answer("❌ Все аккаунты уже имеют WEB токен", show_alert=True)
+        return
+    
+    await state.set_state(AuthState.waiting_convert_count)
+    await state.update_data(convert_total=total)
+    await callback.message.answer(
+        f"🔄 Доступно аккаунтов для конвертации: <b>{total}</b>\n"
+        f"Введите количество для конвертации в WEB:",
+        parse_mode="HTML"
+    )
+    await callback.answer()
+
+@dp.message(AuthState.waiting_convert_count)
+async def handle_convert_count(message: types.Message, state: FSMContext):
+    if message.from_user.id != ADMIN_ID:
+        return
+    
+    try:
+        count = int(message.text.strip())
+    except:
+        return await message.answer("❌ Введите число.")
+    
+    data = await state.get_data()
+    total = data.get("convert_total", 0)
+    
+    if count <= 0 or count > total:
+        return await message.answer(f"❌ Введите число от 1 до {total}.")
+    
+    all_accs = get_all_accounts_list()
+    convertible = [a for a in all_accs if not a.get("web_token")]
+    selected = convertible[:count]
+    
+    msg = await message.answer(f"🔄 Конвертирую <b>{count}</b> аккаунтов в WEB...", parse_mode="HTML")
+    
+    success = 0
+    failed = 0
+    
+    for acc in selected:
+        phone = acc["phone"]
+        token = acc.get("token", "")
+        device_id = acc.get("device_id", str(uuid.uuid4()))
+        
+        if not token:
+            failed += 1
+            continue
+        
+        result = await asyncio.to_thread(
+            convert_android_to_web, token, device_id, phone
+        )
+        
+        if result["success"] and result["web_token"]:
+            uid = acc["uid"]
+            if phone in accounts.get(uid, {}):
+                accounts[uid][phone]["web_token"] = result["web_token"]
+            success += 1
+        else:
+            failed += 1
+        
+        await asyncio.sleep(1)
+    
+    save_data()
+    
+    text = (
+        f"🔄 <b>Конвертация завершена!</b>\n\n"
+        f"✅ Успешно: <b>{success}</b>\n"
+        f"❌ Ошибок: <b>{failed}</b>"
+    )
+    await msg.edit_text(text, parse_mode="HTML")
+    await state.clear()
+
 @dp.callback_query(F.data == "admin_zip")
 async def cb_admin_zip(callback: types.CallbackQuery, state: FSMContext):
     if callback.from_user.id != ADMIN_ID:
@@ -724,9 +1321,32 @@ async def handle_zip_count(message: types.Message, state: FSMContext):
     zip_buffer = BytesIO()
     with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zf:
         for acc in selected:
-            dev = get_device_id_from_session(acc["work_dir"])
-            desktop = build_desktop_json(acc["token"], dev, acc["password"], acc["user_id"], acc["phone"])
-            filename = f"{acc['phone']}.txt"
+            desktop = {
+                "token": acc["token"],
+                "web_token": acc.get("web_token", ""),
+                "deviceType": "ANDROID",
+                "appVersion": "26.17.1",
+                "osVersion": "Android 10",
+                "timezone": "Europe/Moscow",
+                "screen": "408dpi 1080x2292",
+                "pushDeviceType": "GCM",
+                "arch": "arm64-v8a",
+                "locale": "ru",
+                "buildNumber": 6712,
+                "deviceName": "Google Pixel 7",
+                "deviceLocale": "ru",
+                "deviceId": acc.get("device_id", "").replace('-', '')[:16],
+                "clientSessionId": int(time.time() * 1000),
+                "user": {
+                    "user_id": acc["user_id"],
+                    "phone": int(acc["phone"].replace("+", "")),
+                    "photo_id": None,
+                    "first_name": "",
+                    "last_name": ""
+                },
+                "password": acc.get("password", "")
+            }
+            filename = f"{acc['phone']}.json"
             zf.writestr(filename, json.dumps(desktop, ensure_ascii=False, indent=4))
 
     zip_buffer.seek(0)
@@ -753,7 +1373,7 @@ async def cb_add_account(callback: types.CallbackQuery, state: FSMContext):
     await callback.message.answer("📱 Отправьте номер в формате +79111111111", reply_markup=back_keyboard())
     await callback.answer()
 
-# ==================== ВХОД ====================
+# ==================== ВХОД (НАТИВНЫЙ ПРОТОКОЛ) ====================
 
 @dp.message(AuthState.waiting_for_code, F.text.regexp(r'^\+7\d{10}$'))
 async def phone_handler(message: types.Message, state: FSMContext):
@@ -762,236 +1382,168 @@ async def phone_handler(message: types.Message, state: FSMContext):
         return
     phone = message.text.strip()
     uid = message.from_user.id
-    work_dir = f"cache/{uid}/{phone}"
-    os.makedirs(work_dir, exist_ok=True)
 
-    db_path = os.path.join(work_dir, "session.db")
-    if os.path.exists(db_path):
-        os.remove(db_path)
+    auth = MaxAuth()
+    pending[uid] = {"auth": auth, "phone": phone, "status": "waiting_sms"}
+    await state.update_data(phone=phone)
 
-    import builtins
-    builtins._code = None
-    if hasattr(builtins, '_password'):
-        builtins._password = None
-    
-    client = SocketMaxClient(phone=phone, work_dir=work_dir)
-    pending[uid] = {"client": client, "phone": phone, "work_dir": work_dir}
-    await state.update_data(phone=phone, work_dir=work_dir)
+    msg = await message.answer("⏳ Подключаюсь к серверу...")
 
-    msg = await message.answer("⏳ Отправляю SMS...")
-
-    async def auth():
+    def do_auth():
         try:
-            await client.start()
-            await post_login(client, uid, phone, work_dir)
+            if not auth.connect():
+                pending[uid]["status"] = "error:connection_failed"
+                return
+            auth.session_init()
+            time.sleep(0.5)
+            if not auth.start_auth(phone):
+                pending[uid]["status"] = "error:sms_failed"
+                return
+            pending[uid]["status"] = "sms_sent"
         except Exception as e:
-            err = str(e).lower()
-            if "not registered" in err or "not found" in err or "unregistered" in err:
-                try:
-                    import builtins
-                    builtins._code = None
-                    
-                    reg_client = SocketMaxClient(phone=phone, work_dir=work_dir, registration=True)
-                    await reg_client.start()
-                    
-                    await asyncio.sleep(3)
-                    
-                    token = getattr(reg_client, 'token', None)
-                    
-                    if not token:
-                        db_path = os.path.join(work_dir, "session.db")
-                        if os.path.exists(db_path):
-                            try:
-                                conn = sqlite3.connect(db_path)
-                                cur = conn.cursor()
-                                cur.execute("SELECT * FROM sessions LIMIT 1")
-                                row = cur.fetchone()
-                                conn.close()
-                                if row and len(row) > 0:
-                                    token = row[0]
-                            except:
-                                pass
-                    
-                    if token:
-                        reg_client.token = token
-                        pending[uid]["client"] = reg_client
-                        await post_login(reg_client, uid, phone, work_dir)
-                    else:
-                        builtins._code = None
-                        new_client = SocketMaxClient(phone=phone, work_dir=work_dir)
-                        await new_client.start()
-                        pending[uid]["client"] = new_client
-                        await post_login(new_client, uid, phone, work_dir)
-                    return
-                except Exception as reg_err:
-                    err = str(reg_err).lower()
+            pending[uid]["status"] = f"error:{e}"
 
-            if uid in pending:
-                if "block" in err: pending[uid]["status"] = "blocked"
-                elif "password" in err or "2fa" in err: pending[uid]["status"] = "need_password"
-                elif "limit" in err or "flood" in err or "attempt.limit" in err:
-                    pending[uid]["status"] = "flood_sms"
-                elif "invalid" in err or "wrong" in err or "verify.code.wrong" in err:
-                    pending[uid]["status"] = "invalid_code"
-                else: pending[uid]["status"] = f"error:{e}"
+    threading.Thread(target=do_auth, daemon=True).start()
+    await asyncio.sleep(5)
 
-    async def post_login(client, uid, phone, work_dir):
-        try:
-            sessions = await client.get_sessions()
-            current_id = None
-            for sess in sessions:
-                sess_dict = sess if isinstance(sess, dict) else sess.dict() if hasattr(sess, 'dict') else {}
-                if sess_dict.get('current'):
-                    current_id = sess_dict.get('id')
-                    break
-            for sess in sessions:
-                sess_dict = sess if isinstance(sess, dict) else sess.dict() if hasattr(sess, 'dict') else {}
-                if sess_dict.get('id') != current_id and sess_dict.get('id') is not None:
-                    try:
-                        await client.close_session(sess_dict['id'])
-                    except:
-                        pass
-        except:
-            pass
+    if uid not in pending:
+        return
 
-        new_password = gen_random_password()
-        try:
-            await client.change_2fa(new_password)
-        except:
-            try:
-                await client.set_2fa(new_password)
-            except:
-                new_password = ""
-
-        if uid in pending:
-            pending[uid]["token"] = client.token
-            pending[uid]["user_id"] = client.my_id
-            if not pending[uid]["user_id"] and client.me:
-                try:
-                    me_dict = client.me.model_dump() if hasattr(client.me, 'model_dump') else client.me.dict()
-                    pending[uid]["user_id"] = me_dict.get('contact', {}).get('id', 0)
-                except: pass
-            pending[uid]["password_2fa"] = new_password
-            pending[uid]["status"] = "done"
-
-    asyncio.ensure_future(auth())
-    await asyncio.sleep(6)
-
-    if uid not in pending: return
     status = pending[uid].get("status", "")
 
-    if status == "flood_sms":
-        await msg.edit_text("⏳ Слишком много попыток.")
-        del pending[uid]; await state.clear()
-    elif status == "blocked":
-        await msg.edit_text("🚫 Заблокирован.")
-        del pending[uid]; await state.clear()
-    elif status and status.startswith("error:"):
-        await msg.edit_text(f"❌ {status[6:]}")
-        del pending[uid]; await state.clear()
-    else:
+    if status == "sms_sent":
         await msg.edit_text("✅ SMS отправлена. Введите код из 6 цифр:")
+    elif status and status.startswith("error:"):
+        err_text = status[6:]
+        await msg.edit_text(f"❌ {err_text}")
+        auth.close()
+        del pending[uid]
+        await state.clear()
+    else:
+        await msg.edit_text("⏳ Ожидание SMS... Введите код из 6 цифр:")
 
 @dp.message(AuthState.waiting_for_code, F.text.regexp(r'^\d{6}$'))
 async def code_handler(message: types.Message, state: FSMContext):
     uid = message.from_user.id
-    if uid not in pending: return await message.answer("⏳ Сессия устарела. /start")
+    if uid not in pending:
+        return await message.answer("⏳ Сессия устарела. /start")
 
     data = await state.get_data()
     phone = data.get("phone", "")
-    work_dir = data.get("work_dir", "")
+    code = message.text.strip()
+    auth = pending[uid].get("auth")
 
-    import builtins
-    builtins._code = message.text.strip()
+    if not auth:
+        return await message.answer("⏳ Сессия устарела. /start")
 
     msg = await message.answer("⏳ Проверяю код...")
 
-    for _ in range(240):
-        await asyncio.sleep(0.5)
-        if uid not in pending:
-            await msg.edit_text("⏳ Сессия устарела."); await state.clear(); return
-        status = pending[uid].get("status", "")
-
-        if status == "done":
-            token = pending[uid]["token"]
-            vid = pending[uid].get("user_id", 0)
-            pwd_2fa = pending[uid].get("password_2fa", "")
-            uid_str = str(uid)
-            if uid_str not in accounts: accounts[uid_str] = {}
-            accounts[uid_str][phone] = {"token": token, "user_id": vid, "work_dir": work_dir, "password": pwd_2fa}
-
-            if uid_str not in users:
-                users[uid_str] = {"balance": 0, "total_phones": 0, "total_earned": 0}
-            users[uid_str]["total_phones"] += 1
-            users[uid_str]["total_earned"] += PRICE_PER_PHONE
-            users[uid_str]["balance"] += PRICE_PER_PHONE
-
-            save_data()
-            text = f"✅ Номер принят! Аккаунт успешно встал\n💰 Начислено: ${PRICE_PER_PHONE}"
-            await msg.edit_text(text)
-            del pending[uid]; await state.clear(); return
-
-        elif status == "need_password":
-            await state.set_state(AuthState.waiting_for_password)
-            await msg.edit_text("🔐 Введите пароль 2FA:"); return
-        elif status == "flood_sms":
-            await msg.edit_text("⏳ Слишком много попыток.")
-            del pending[uid]; await state.clear(); return
-        elif status == "invalid_code":
-            await msg.edit_text("❌ Неверный код."); return
-        elif status == "blocked":
-            await msg.edit_text("🚫 Заблокирован."); del pending[uid]; await state.clear(); return
-        elif status and status.startswith("error:"):
-            await msg.edit_text(f"❌ {status[6:]}"); del pending[uid]; await state.clear(); return
-
-    await msg.edit_text("❌ Таймаут."); del pending[uid]; await state.clear()
-
-@dp.message(AuthState.waiting_for_password)
-async def password_handler(message: types.Message, state: FSMContext):
-    uid = message.from_user.id
-    if uid not in pending: return await message.answer("⏳ Сессия устарела. /start")
-
-    data = await state.get_data()
-    phone = data.get("phone", "")
-    work_dir = data.get("work_dir", "")
-    pwd = message.text.strip()
-
-    import builtins
-    builtins._password = pwd
-
-    msg = await message.answer("⏳ Проверяю пароль...")
-    await asyncio.sleep(5)
-
-    db_path = os.path.join(work_dir, "session.db")
-    token = None
-    if os.path.exists(db_path):
+    result = None
+    def do_verify():
+        nonlocal result
         try:
-            conn = sqlite3.connect(db_path)
-            cur = conn.cursor()
-            cur.execute("SELECT * FROM sessions LIMIT 1")
-            row = cur.fetchone()
-            if row:
-                token = row[0]
-                pending[uid]["token"] = token
-                pending[uid]["status"] = "done"
-            conn.close()
-        except: pass
+            result = auth.verify_code(code)
+        except Exception as e:
+            result = {"error": str(e)}
+
+    threading.Thread(target=do_verify, daemon=True).start()
+    await asyncio.sleep(3)
+
+    if not result:
+        await asyncio.sleep(5)
+
+    if not result:
+        await msg.edit_text("❌ Таймаут проверки кода.")
+        auth.close()
+        del pending[uid]
+        await state.clear()
+        return
+
+    if "error" in result:
+        err = str(result["error"]).lower()
+        if "wrong" in err or "invalid" in err:
+            await msg.edit_text("❌ Неверный код. Попробуйте ещё раз.")
+            return
+        await msg.edit_text(f"❌ Ошибка: {result['error']}")
+        auth.close()
+        del pending[uid]
+        await state.clear()
+        return
+
+    if result.get("needs_registration"):
+        pending[uid]["status"] = "registering"
+        pending[uid]["auth_token"] = auth.auth_token
+        
+        def do_register():
+            try:
+                reg = MaxRegistration(device_id=auth.device_id)
+                if not reg.connect():
+                    pending[uid]["status"] = "error:registration_connection"
+                    return
+                reg.session_init()
+                time.sleep(0.5)
+                reg.auth_token = auth.auth_token
+                reg_result = reg.register(code, "User")
+                reg.close()
+                
+                if reg_result.get("success"):
+                    pending[uid]["token"] = reg_result["token"]
+                    pending[uid]["device_id"] = reg.device_id
+                    pending[uid]["status"] = "done"
+                else:
+                    pending[uid]["status"] = f"error:{reg_result.get('error', 'registration_failed')}"
+            except Exception as e:
+                pending[uid]["status"] = f"error:{e}"
+
+        threading.Thread(target=do_register, daemon=True).start()
+        await msg.edit_text("⏳ Регистрирую аккаунт...")
+        
+        for _ in range(30):
+            await asyncio.sleep(1)
+            if uid not in pending:
+                return
+            status = pending[uid].get("status", "")
+            if status == "done":
+                break
+            if status and status.startswith("error:"):
+                await msg.edit_text(f"❌ {status[6:]}")
+                auth.close()
+                del pending[uid]
+                await state.clear()
+                return
+        
+        if pending[uid].get("status") != "done":
+            await msg.edit_text("❌ Таймаут регистрации.")
+            auth.close()
+            del pending[uid]
+            await state.clear()
+            return
+
+    if result.get("needs_password"):
+        pending[uid]["track_id"] = auth.track_id
+        await state.set_state(AuthState.waiting_for_password)
+        await msg.edit_text("🔐 Введите пароль 2FA:")
+        return
+
+    if result.get("token"):
+        pending[uid]["token"] = result["token"]
+        pending[uid]["device_id"] = auth.device_id
+        pending[uid]["status"] = "done"
 
     if pending[uid].get("status") == "done":
-        token = pending[uid].get("token", "")
-        vid = pending[uid].get("user_id", 0)
-        if not vid:
-            client = pending[uid].get("client")
-            if client and client.me:
-                try:
-                    me_dict = client.me.model_dump() if hasattr(client.me, 'model_dump') else client.me.dict()
-                    vid = me_dict.get('contact', {}).get('id', 0)
-                except: pass
-
-        pwd_2fa = pending[uid].get("password_2fa", pwd)
+        token = pending[uid]["token"]
+        device_id = pending[uid].get("device_id", "")
         uid_str = str(uid)
-        if uid_str not in accounts: accounts[uid_str] = {}
-        accounts[uid_str][phone] = {"token": token, "user_id": vid, "work_dir": work_dir, "password": pwd_2fa}
+        
+        if uid_str not in accounts:
+            accounts[uid_str] = {}
+        accounts[uid_str][phone] = {
+            "token": token,
+            "web_token": None,
+            "device_id": device_id,
+            "user_id": 0,
+            "password": ""
+        }
 
         if uid_str not in users:
             users[uid_str] = {"balance": 0, "total_phones": 0, "total_earned": 0}
@@ -1000,34 +1552,76 @@ async def password_handler(message: types.Message, state: FSMContext):
         users[uid_str]["balance"] += PRICE_PER_PHONE
 
         save_data()
-        text = f"✅ Номер принят! Аккаунт успешно встал\n💰 Начислено: ${PRICE_PER_PHONE}"
-        await msg.edit_text(text)
-        del pending[uid]; await state.clear(); return
+        await msg.edit_text(f"✅ Номер принят! Аккаунт успешно встал\n💰 Начислено: ${PRICE_PER_PHONE}")
+        auth.close()
+        del pending[uid]
+        await state.clear()
+        return
 
-    await msg.edit_text("❌ Неверный пароль. Попробуйте ещё раз.")
+    await msg.edit_text("❌ Неизвестная ошибка.")
+    auth.close()
+    del pending[uid]
+    await state.clear()
+
+@dp.message(AuthState.waiting_for_password)
+async def password_handler(message: types.Message, state: FSMContext):
+    uid = message.from_user.id
+    if uid not in pending:
+        return await message.answer("⏳ Сессия устарела. /start")
+
+    data = await state.get_data()
+    phone = data.get("phone", "")
+    pwd = message.text.strip()
+    auth = pending[uid].get("auth")
+
+    if not auth:
+        return await message.answer("⏳ Сессия устарела. /start")
+
+    msg = await message.answer("⏳ Проверяю пароль...")
+
+    token = None
+    def do_check():
+        nonlocal token
+        try:
+            token = auth.check_password(pwd)
+        except:
+            pass
+
+    threading.Thread(target=do_check, daemon=True).start()
+    await asyncio.sleep(3)
+
+    if token:
+        pending[uid]["token"] = token
+        pending[uid]["device_id"] = auth.device_id
+        uid_str = str(uid)
+
+        if uid_str not in accounts:
+            accounts[uid_str] = {}
+        accounts[uid_str][phone] = {
+            "token": token,
+            "web_token": None,
+            "device_id": auth.device_id,
+            "user_id": 0,
+            "password": pwd
+        }
+
+        if uid_str not in users:
+            users[uid_str] = {"balance": 0, "total_phones": 0, "total_earned": 0}
+        users[uid_str]["total_phones"] += 1
+        users[uid_str]["total_earned"] += PRICE_PER_PHONE
+        users[uid_str]["balance"] += PRICE_PER_PHONE
+
+        save_data()
+        await msg.edit_text(f"✅ Номер принят! Аккаунт успешно встал\n💰 Начислено: ${PRICE_PER_PHONE}")
+    else:
+        await msg.edit_text("❌ Неверный пароль. Попробуйте ещё раз.")
+        return
+
+    auth.close()
+    del pending[uid]
+    await state.clear()
 
 async def main():
-    import builtins, getpass
-    oi, og = builtins.input, getpass.getpass
-    def pi(prompt=""):
-        p = prompt.lower()
-        if "code" in p or "код" in p:
-            while not hasattr(builtins,'_code') or builtins._code is None: time.sleep(0.5)
-            c = builtins._code; builtins._code = None; return c
-        if "password" in p or "пароль" in p:
-            while not hasattr(builtins,'_password') or builtins._password is None: time.sleep(0.5)
-            pwd = builtins._password; builtins._password = None; return pwd
-        return oi(prompt)
-    def pg(prompt=""):
-        p = prompt.lower()
-        if "password" in p or "пароль" in p or "2fa" in p:
-            for u in list(pending.keys()):
-                if pending[u].get("status","") not in ("done","blocked","flood_sms"):
-                    pending[u]["status"] = "need_password"
-            while not hasattr(builtins,'_password') or builtins._password is None: time.sleep(0.5)
-            pwd = builtins._password; builtins._password = None; return pwd
-        return og(prompt)
-    builtins.input = pi; getpass.getpass = pg
     logging.info("Бот запущен!")
     await dp.start_polling(bot)
 
