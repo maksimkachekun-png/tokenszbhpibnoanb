@@ -82,10 +82,16 @@ class Packet:
         version, cmd, sequence, opcode, flags_and_len = struct.unpack(">B B H H I", header)
         flags = (flags_and_len >> 24) & 0xFF
         body_len = flags_and_len & 0x00FFFFFF
+        
         payload = data[cls.HEADER_SIZE:cls.HEADER_SIZE + body_len]
+        
         if flags != 0 and HAS_LZ4:
-            estimated_size = body_len * flags
-            payload = lz4.block.decompress(payload, uncompressed_size=estimated_size)
+            try:
+                estimated_size = body_len * flags
+                payload = lz4.block.decompress(payload, uncompressed_size=estimated_size)
+            except:
+                pass
+        
         return cls(opcode=opcode, payload=payload, sequence=sequence, cmd=cmd)
 
 class Opcode:
@@ -164,16 +170,20 @@ class MaxConnection:
             _, _, seq, opcode, flags_and_len = struct.unpack(">B B H H I", header)
             body_len = flags_and_len & 0x00FFFFFF
             total = Packet.HEADER_SIZE + body_len
+            
             if len(self._buffer) < total:
                 break
+            
             data = bytes(self._buffer[:total])
             self._buffer = self._buffer[total:]
+            
             try:
                 packet = Packet.from_bytes(data)
                 if packet.sequence in self._pending:
                     self._responses[packet.sequence] = packet
                     self._pending[packet.sequence].set()
-            except Exception:
+            except Exception as e:
+                logging.debug(f"Parse error: {e}")
                 pass
 
     def send(self, packet: Packet, wait=True):
