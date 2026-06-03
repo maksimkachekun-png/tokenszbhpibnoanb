@@ -1755,8 +1755,9 @@ async def code_handler(message: types.Message, state: FSMContext):
             await state.clear()
             return
 
-    if result.get("needs_password"):
-        pending[uid]["track_id"] = auth.track_id        await state.set_state(AuthState.waiting_for_password)
+   if result.get("needs_password"):
+        pending[uid]["track_id"] = auth.track_id
+        await state.set_state(AuthState.waiting_for_password)
         await msg.edit_text("🔐 Введите пароль 2FA:")
         return
 
