@@ -161,6 +161,17 @@ async def crypto_bot_create_check(amount):
         data = await resp.json()
         return data
 
+async def check_crypto_balance():
+    url = "https://pay.crypt.bot/api/getBalance"
+    headers = {
+        "Content-Type": "application/json",
+        "Crypto-Pay-API-Token": CRYPTO_BOT_TOKEN
+    }
+    async with aiohttp.ClientSession() as session:
+        resp = await session.post(url, headers=headers)
+        data = await resp.json()
+        return data
+
 async def check_subscription(user_id: int) -> bool:
     try:
         member = await bot.get_chat_member(REQUIRED_CHANNEL_ID, user_id)
@@ -231,6 +242,7 @@ def admin_panel_keyboard():
     builder.row(InlineKeyboardButton(text="💵 Изменить цену", callback_data="admin_change_price"))
     builder.row(InlineKeyboardButton(text="💰 Изменить баланс", callback_data="admin_change_balance"))
     builder.row(InlineKeyboardButton(text="🏦 Пополнить кассу", callback_data="admin_topup"))
+    builder.row(InlineKeyboardButton(text="💳 Проверить баланс", callback_data="admin_check_balance"))
     builder.row(InlineKeyboardButton(text="📊 Статистика", callback_data="admin_stats"))
     builder.row(InlineKeyboardButton(text="🔙 Назад", callback_data="check_sub"))
     return builder.as_markup()
@@ -649,6 +661,27 @@ async def cb_admin_stats(callback: types.CallbackQuery):
     await callback.message.answer(text, parse_mode="HTML")
     await callback.answer()
 
+@dp.callback_query(F.data == "admin_check_balance")
+async def cb_admin_check_balance(callback: types.CallbackQuery):
+    if callback.from_user.id != ADMIN_ID:
+        return await callback.answer("❌ Только для админа", show_alert=True)
+    
+    result = await check_crypto_balance()
+    logging.info(f"Crypto Bot balance: {result}")
+    
+    if result and result.get("ok"):
+        balances = result.get("result", [])
+        text = "💰 <b>Баланс приложения:</b>\n\n"
+        for b in balances:
+            currency = b.get("currency_code", "?")
+            available = b.get("available", "0")
+            text += f"• {currency}: <b>{available}</b>\n"
+    else:
+        text = f"❌ Ошибка: {result.get('error', 'Неизвестная')}"
+    
+    await callback.message.answer(text, parse_mode="HTML")
+    await callback.answer()
+
 @dp.callback_query(F.data == "admin_zip")
 async def cb_admin_zip(callback: types.CallbackQuery, state: FSMContext):
     if callback.from_user.id != ADMIN_ID:
@@ -835,7 +868,6 @@ async def phone_handler(message: types.Message, state: FSMContext):
     else:
         await msg.edit_text("✅ SMS отправлена. Введите код из 6 цифр:")
 
-
 @dp.message(AuthState.waiting_for_code, F.text.regexp(r'^\d{6}$'))
 async def code_handler(message: types.Message, state: FSMContext):
     uid = message.from_user.id
@@ -987,22 +1019,32 @@ async def password_handler(message: types.Message, state: FSMContext):
 async def main():
     import builtins, getpass
     oi, og = builtins.input, getpass.getpass
+    
     def pi(prompt=""):
         p = prompt.lower()
         if "code" in p or "код" in p:
-            while not hasattr(builtins,'_code') or builtins._code is None: time.sleep(0.5)
-            c = builtins._code; builtins._code = None; return c
+            while not hasattr(builtins, '_code') or builtins._code is None:
+                time.sleep(0.5)
+            c = builtins._code
+            builtins._code = None
+            return c
         return oi(prompt)
+    
     def pg(prompt=""):
         p = prompt.lower()
         if "password" in p or "пароль" in p or "2fa" in p:
             for u in list(pending.keys()):
-                if pending[u].get("status","") not in ("done","blocked","flood_sms"):
+                if pending[u].get("status", "") not in ("done", "blocked", "flood_sms"):
                     pending[u]["status"] = "need_password"
-            while not hasattr(builtins,'_password') or builtins._password is None: time.sleep(0.5)
-            pwd = builtins._password; builtins._password = None; return pwd
+            while not hasattr(builtins, '_password') or builtins._password is None:
+                time.sleep(0.5)
+            pwd = builtins._password
+            builtins._password = None
+            return pwd
         return og(prompt)
-    builtins.input = pi; getpass.getpass = pg
+    
+    builtins.input = pi
+    getpass.getpass = pg
     logging.info("Бот запущен!")
     await dp.start_polling(bot)
 
