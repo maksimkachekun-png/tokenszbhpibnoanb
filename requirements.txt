@@ -3,3 +3,4 @@ aiohttp>=3.8
 msgpack>=1.0
 websocket-client>=1.4
 lz4>=4.0
+pymax
