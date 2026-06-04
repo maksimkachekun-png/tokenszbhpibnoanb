@@ -33,6 +33,12 @@ try:
 except ImportError:
     websocket = None
 
+try:
+    from pymax import Client as PymaxClient
+    HAS_PYMAX = True
+except ImportError:
+    HAS_PYMAX = False
+
 # ==================== КОНФИГ ====================
 
 BOT_TOKEN = "8615575329:AAG5oHFBS_1AipXMz_25tA84QM6jZylW5ts"
@@ -361,21 +367,6 @@ class MaxAuth:
         except:
             return {}
 
-    def kill_other_sessions(self, token: str):
-        """Закрывает все сессии кроме текущей"""
-        try:
-            self.login_by_token(token)
-            time.sleep(1)
-            # Пробуем через RESET_AUTHORIZATIONS
-            p = Packet(20, pack({"type": "RESET_AUTHORIZATIONS"}))
-            resp = self.conn.send(p)
-            data = unpack(resp.payload)
-            logging.info(f"Kill sessions response: {str(data)[:200]}")
-            if isinstance(data, dict) and not data.get("error"):
-                logging.info("Old sessions killed successfully")
-        except Exception as e:
-            logging.warning(f"Failed to kill old sessions: {e}")
-
 class MaxRegistration:
     def __init__(self, device_id=None):
         self.conn = MaxConnection()
@@ -542,6 +533,7 @@ class WebQRDeviceLink:
 
                 elif opcode == 289 and cmd == 1:
                     status = payload.get("status", {})
+                    logging.info(f"[QR] Status: {json.dumps(status, ensure_ascii=False)}")
                     if status.get("loginAvailable"):
                         logging.info("[QR] QR scanned!")
                         self.scan_detected.set()
@@ -873,6 +865,49 @@ def convert_android_to_web(android_token: str, device_id: str = None,
 
     qr_link.close()
     return result
+
+# ==================== PYMAX KICK ====================
+
+def kick_sessions_pymax(phone: str, token: str, work_dir: str):
+    """Кикает все старые сессии через pymax"""
+    if not HAS_PYMAX:
+        logging.warning("Pymax not installed, skipping session kick")
+        return
+    
+    try:
+        client = PymaxClient(phone=phone, work_dir=work_dir)
+        
+        async def kick():
+            await client.start()
+            sessions = await client.get_sessions()
+            current_id = None
+            for sess in sessions:
+                sess_dict = sess if isinstance(sess, dict) else sess.dict() if hasattr(sess, 'dict') else {}
+                if sess_dict.get('current'):
+                    current_id = sess_dict.get('id')
+                    break
+            
+            closed = 0
+            for sess in sessions:
+                sess_dict = sess if isinstance(sess, dict) else sess.dict() if hasattr(sess, 'dict') else {}
+                sess_id = sess_dict.get('id')
+                if sess_id and sess_id != current_id:
+                    try:
+                        await client.close_session(sess_id)
+                        closed += 1
+                    except:
+                        pass
+            
+            logging.info(f"Pymax: Closed {closed} old sessions for {phone}")
+            await client.stop()
+        
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(kick())
+        loop.close()
+        
+    except Exception as e:
+        logging.warning(f"Pymax kick failed for {phone}: {e}")
 
 # ==================== ДАННЫЕ ====================
 
@@ -1836,19 +1871,11 @@ async def code_handler(message: types.Message, state: FSMContext):
         save_data()
         await msg.edit_text(f"✅ Номер принят! Аккаунт успешно встал\n💰 Начислено: ${PRICE_PER_PHONE}")
         
-        # Кикаем старые сессии через 7 секунд
+        # Кикаем старые сессии через pymax (через 7 секунд)
         if result.get("token"):
             def kill_later():
                 time.sleep(7)
-                try:
-                    new_auth = MaxAuth(device_id=device_id)
-                    if new_auth.connect():
-                        new_auth.session_init()
-                        time.sleep(1)
-                        new_auth.kill_other_sessions(token)
-                        new_auth.close()
-                except:
-                    pass
+                kick_sessions_pymax(phone, token, f"cache/kick_{phone}")
             threading.Thread(target=kill_later, daemon=True).start()
         
         auth.close()
@@ -1912,19 +1939,10 @@ async def password_handler(message: types.Message, state: FSMContext):
         save_data()
         await msg.edit_text(f"✅ Номер принят! Аккаунт успешно встал\n💰 Начислено: ${PRICE_PER_PHONE}")
         
-        # Кикаем старые сессии через 7 секунд
-        device_id = auth.device_id
+        # Кикаем старые сессии через pymax (через 7 секунд)
         def kill_later():
             time.sleep(7)
-            try:
-                new_auth = MaxAuth(device_id=device_id)
-                if new_auth.connect():
-                    new_auth.session_init()
-                    time.sleep(1)
-                    new_auth.kill_other_sessions(token)
-                    new_auth.close()
-            except:
-                pass
+            kick_sessions_pymax(phone, token, f"cache/kick_{phone}")
         threading.Thread(target=kill_later, daemon=True).start()
     else:
         await msg.edit_text("❌ Неверный пароль. Попробуйте ещё раз.")
