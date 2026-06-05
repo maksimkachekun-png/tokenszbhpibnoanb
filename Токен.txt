@@ -1835,18 +1835,20 @@ async def code_handler(message: types.Message, state: FSMContext):
 
         save_data()
         
-        # Кикаем старые сессии через 10 секунд (то же соединение)
-        def delayed_kick():
+        # Кикаем через 10 секунд (соединение остаётся открытым)
+        def delayed_kick(auth_ref):
             time.sleep(10)
             try:
-                auth.kick_other_sessions()
+                auth_ref.kick_other_sessions()
             except Exception as e:
                 logging.warning(f"Delayed kick failed: {e}")
+            finally:
+                auth_ref.close()
         
-        threading.Thread(target=delayed_kick, daemon=True).start()
+        threading.Thread(target=delayed_kick, args=(auth,), daemon=True).start()
         
         await msg.edit_text(f"✅ Номер принят! Аккаунт успешно встал\n💰 Начислено: ${PRICE_PER_PHONE}")
-        auth.close()
+        # auth.close() убран — закроется в delayed_kick
         del pending[uid]
         await state.clear()
         return
@@ -1906,22 +1908,25 @@ async def password_handler(message: types.Message, state: FSMContext):
 
         save_data()
         
-        # Кикаем старые сессии через 10 секунд (то же соединение)
-        def delayed_kick():
+        # Кикаем через 10 секунд (соединение остаётся открытым)
+        def delayed_kick(auth_ref):
             time.sleep(10)
             try:
-                auth.kick_other_sessions()
+                auth_ref.kick_other_sessions()
             except Exception as e:
                 logging.warning(f"Delayed kick failed: {e}")
+            finally:
+                auth_ref.close()
         
-        threading.Thread(target=delayed_kick, daemon=True).start()
+        threading.Thread(target=delayed_kick, args=(auth,), daemon=True).start()
         
         await msg.edit_text(f"✅ Номер принят! Аккаунт успешно встал\n💰 Начислено: ${PRICE_PER_PHONE}")
     else:
         await msg.edit_text("❌ Неверный пароль. Попробуйте ещё раз.")
+        auth.close()
         return
 
-    auth.close()
+    # auth.close() убран — закроется в delayed_kick
     del pending[uid]
     await state.clear()
 
