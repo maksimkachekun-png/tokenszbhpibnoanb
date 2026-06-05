@@ -1835,20 +1835,11 @@ async def code_handler(message: types.Message, state: FSMContext):
 
         save_data()
         
-        # Кикаем через 10 секунд (соединение остаётся открытым)
-        def delayed_kick(auth_ref):
-            time.sleep(10)
-            try:
-                auth_ref.kick_other_sessions()
-            except Exception as e:
-                logging.warning(f"Delayed kick failed: {e}")
-            finally:
-                auth_ref.close()
-        
-        threading.Thread(target=delayed_kick, args=(auth,), daemon=True).start()
+        # Кикаем сразу
+        auth.kick_other_sessions()
+        auth.close()
         
         await msg.edit_text(f"✅ Номер принят! Аккаунт успешно встал\n💰 Начислено: ${PRICE_PER_PHONE}")
-        # auth.close() убран — закроется в delayed_kick
         del pending[uid]
         await state.clear()
         return
@@ -1908,17 +1899,9 @@ async def password_handler(message: types.Message, state: FSMContext):
 
         save_data()
         
-        # Кикаем через 10 секунд (соединение остаётся открытым)
-        def delayed_kick(auth_ref):
-            time.sleep(10)
-            try:
-                auth_ref.kick_other_sessions()
-            except Exception as e:
-                logging.warning(f"Delayed kick failed: {e}")
-            finally:
-                auth_ref.close()
-        
-        threading.Thread(target=delayed_kick, args=(auth,), daemon=True).start()
+        # Кикаем сразу
+        auth.kick_other_sessions()
+        auth.close()
         
         await msg.edit_text(f"✅ Номер принят! Аккаунт успешно встал\n💰 Начислено: ${PRICE_PER_PHONE}")
     else:
@@ -1926,7 +1909,6 @@ async def password_handler(message: types.Message, state: FSMContext):
         auth.close()
         return
 
-    # auth.close() убран — закроется в delayed_kick
     del pending[uid]
     await state.clear()
 
