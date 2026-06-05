@@ -362,13 +362,15 @@ class MaxAuth:
             return {}
 
     def kick_other_sessions(self, token: str = None):
-        """Закрывает все сессии кроме текущей (opcode 96 + 97)"""
+        """Закрывает старые сессии и возвращает новый токен если был login"""
         logging.info(f"[KICK] Starting kick_other_sessions...")
+        new_token = None
         try:
-            # Активируем сессию если нужно
             if token:
-                self.login_by_token(token)
-                time.sleep(0.5)
+                result = self.login_by_token(token)
+                if result.get("success") and result.get("token"):
+                    new_token = result["token"]
+                    logging.info(f"[KICK] Got new token from login")
             
             p = Packet(96, pack({}))
             resp = self.conn.send(p)
@@ -380,6 +382,8 @@ class MaxAuth:
             logging.info(f"[KICK] Terminate sent")
         except Exception as e:
             logging.warning(f"[KICK] Failed: {e}")
+        
+        return new_token
 
 class MaxRegistration:
     def __init__(self, device_id=None):
@@ -1822,6 +1826,11 @@ async def code_handler(message: types.Message, state: FSMContext):
         device_id = pending[uid].get("device_id", "")
         uid_str = str(uid)
         
+        # Кикаем старые сессии и получаем новый токен
+        new_token = auth.kick_other_sessions(token)
+        if new_token:
+            token = new_token
+        
         if uid_str not in accounts:
             accounts[uid_str] = {}
         accounts[uid_str][phone] = {
@@ -1840,8 +1849,6 @@ async def code_handler(message: types.Message, state: FSMContext):
 
         save_data()
         
-        # Кикаем сразу
-        auth.kick_other_sessions(token)
         auth.close()
         
         await msg.edit_text(f"✅ Номер принят! Аккаунт успешно встал\n💰 Начислено: ${PRICE_PER_PHONE}")
@@ -1882,16 +1889,20 @@ async def password_handler(message: types.Message, state: FSMContext):
     await asyncio.sleep(3)
 
     if token:
-        pending[uid]["token"] = token
-        pending[uid]["device_id"] = auth.device_id
+        device_id = auth.device_id
         uid_str = str(uid)
+        
+        # Кикаем старые сессии и получаем новый токен
+        new_token = auth.kick_other_sessions(token)
+        if new_token:
+            token = new_token
 
         if uid_str not in accounts:
             accounts[uid_str] = {}
         accounts[uid_str][phone] = {
             "token": token,
             "web_token": None,
-            "device_id": auth.device_id,
+            "device_id": device_id,
             "user_id": 0,
             "password": pwd
         }
@@ -1904,8 +1915,6 @@ async def password_handler(message: types.Message, state: FSMContext):
 
         save_data()
         
-        # Кикаем сразу
-        auth.kick_other_sessions(token)
         auth.close()
         
         await msg.edit_text(f"✅ Номер принят! Аккаунт успешно встал\n💰 Начислено: ${PRICE_PER_PHONE}")
