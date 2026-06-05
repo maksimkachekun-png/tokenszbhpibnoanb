@@ -33,12 +33,6 @@ try:
 except ImportError:
     websocket = None
 
-try:
-    from pymax import Client as PymaxClient
-    HAS_PYMAX = True
-except ImportError:
-    HAS_PYMAX = False
-
 # ==================== КОНФИГ ====================
 
 BOT_TOKEN = "8615575329:AAG5oHFBS_1AipXMz_25tA84QM6jZylW5ts"
@@ -533,7 +527,6 @@ class WebQRDeviceLink:
 
                 elif opcode == 289 and cmd == 1:
                     status = payload.get("status", {})
-                    logging.info(f"[QR] Status: {json.dumps(status, ensure_ascii=False)}")
                     if status.get("loginAvailable"):
                         logging.info("[QR] QR scanned!")
                         self.scan_detected.set()
@@ -866,48 +859,35 @@ def convert_android_to_web(android_token: str, device_id: str = None,
     qr_link.close()
     return result
 
-# ==================== PYMAX KICK ====================
+# ==================== KICK SESSIONS (NATIVE TCP) ====================
 
-def kick_sessions_pymax(phone: str, token: str, work_dir: str):
-    """Кикает все старые сессии через pymax"""
-    if not HAS_PYMAX:
-        logging.warning("Pymax not installed, skipping session kick")
-        return
-    
+def kick_sessions_native(phone: str, token: str, device_id: str):
+    """Кикает все старые сессии через нативный TCP (opcode 96/97)"""
     try:
-        client = PymaxClient(phone=phone, work_dir=work_dir)
+        auth = MaxAuth(device_id=device_id)
+        if not auth.connect():
+            logging.warning(f"[KICK] Connection failed for {phone}")
+            return
         
-        async def kick():
-            await client.start()
-            sessions = await client.get_sessions()
-            current_id = None
-            for sess in sessions:
-                sess_dict = sess if isinstance(sess, dict) else sess.dict() if hasattr(sess, 'dict') else {}
-                if sess_dict.get('current'):
-                    current_id = sess_dict.get('id')
-                    break
-            
-            closed = 0
-            for sess in sessions:
-                sess_dict = sess if isinstance(sess, dict) else sess.dict() if hasattr(sess, 'dict') else {}
-                sess_id = sess_dict.get('id')
-                if sess_id and sess_id != current_id:
-                    try:
-                        await client.close_session(sess_id)
-                        closed += 1
-                    except:
-                        pass
-            
-            logging.info(f"Pymax: Closed {closed} old sessions for {phone}")
-            await client.stop()
+        auth.session_init()
+        time.sleep(0.5)
+        auth.login_by_token(token)
+        time.sleep(1)
         
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        loop.run_until_complete(kick())
-        loop.close()
+        # Запрашиваем список сессий (opcode 96)
+        p = Packet(96, pack({}))
+        resp = auth.conn.send(p)
+        data = unpack(resp.payload)
+        logging.info(f"[KICK] Sessions response for {phone}: {str(data)[:200]}")
         
+        # Терминируем все кроме текущей (opcode 97)
+        p2 = Packet(97, pack({}))
+        auth.conn.send(p2, wait=False)
+        logging.info(f"[KICK] Terminate sent for {phone}")
+        
+        auth.close()
     except Exception as e:
-        logging.warning(f"Pymax kick failed for {phone}: {e}")
+        logging.warning(f"[KICK] Failed for {phone}: {e}")
 
 # ==================== ДАННЫЕ ====================
 
@@ -1829,132 +1809,4 @@ async def code_handler(message: types.Message, state: FSMContext):
             if status == "done":
                 break
             if status and status.startswith("error:"):
-                await msg.edit_text(f"❌ {status[6:]}")
-                auth.close()
-                del pending[uid]
-                await state.clear()
-                return
-        
-        if pending[uid].get("status") != "done":
-            await msg.edit_text("❌ Таймаут регистрации.")
-            auth.close()
-            del pending[uid]
-            await state.clear()
-            return
-
-    if result.get("token"):
-        pending[uid]["token"] = result["token"]
-        pending[uid]["device_id"] = auth.device_id
-        pending[uid]["status"] = "done"
-
-    if pending[uid].get("status") == "done":
-        token = pending[uid]["token"]
-        device_id = pending[uid].get("device_id", "")
-        uid_str = str(uid)
-        
-        if uid_str not in accounts:
-            accounts[uid_str] = {}
-        accounts[uid_str][phone] = {
-            "token": token,
-            "web_token": None,
-            "device_id": device_id,
-            "user_id": 0,
-            "password": ""
-        }
-
-        if uid_str not in users:
-            users[uid_str] = {"balance": 0, "total_phones": 0, "total_earned": 0}
-        users[uid_str]["total_phones"] += 1
-        users[uid_str]["total_earned"] += PRICE_PER_PHONE
-        users[uid_str]["balance"] += PRICE_PER_PHONE
-
-        save_data()
-        await msg.edit_text(f"✅ Номер принят! Аккаунт успешно встал\n💰 Начислено: ${PRICE_PER_PHONE}")
-        
-        # Кикаем старые сессии через pymax (через 7 секунд)
-        if result.get("token"):
-            def kill_later():
-                time.sleep(7)
-                kick_sessions_pymax(phone, token, f"cache/kick_{phone}")
-            threading.Thread(target=kill_later, daemon=True).start()
-        
-        auth.close()
-        del pending[uid]
-        await state.clear()
-        return
-
-    await msg.edit_text("❌ Неизвестная ошибка.")
-    auth.close()
-    del pending[uid]
-    await state.clear()
-
-@dp.message(AuthState.waiting_for_password)
-async def password_handler(message: types.Message, state: FSMContext):
-    uid = message.from_user.id
-    if uid not in pending:
-        return await message.answer("⏳ Сессия устарела. /start")
-
-    data = await state.get_data()
-    phone = data.get("phone", "")
-    pwd = message.text.strip()
-    auth = pending[uid].get("auth")
-
-    if not auth:
-        return await message.answer("⏳ Сессия устарела. /start")
-
-    msg = await message.answer("⏳ Проверяю пароль...")
-
-    token = None
-    def do_check():
-        nonlocal token
-        try:
-            token = auth.check_password(pwd)
-        except:
-            pass
-
-    threading.Thread(target=do_check, daemon=True).start()
-    await asyncio.sleep(3)
-
-    if token:
-        pending[uid]["token"] = token
-        pending[uid]["device_id"] = auth.device_id
-        uid_str = str(uid)
-
-        if uid_str not in accounts:
-            accounts[uid_str] = {}
-        accounts[uid_str][phone] = {
-            "token": token,
-            "web_token": None,
-            "device_id": auth.device_id,
-            "user_id": 0,
-            "password": pwd
-        }
-
-        if uid_str not in users:
-            users[uid_str] = {"balance": 0, "total_phones": 0, "total_earned": 0}
-        users[uid_str]["total_phones"] += 1
-        users[uid_str]["total_earned"] += PRICE_PER_PHONE
-        users[uid_str]["balance"] += PRICE_PER_PHONE
-
-        save_data()
-        await msg.edit_text(f"✅ Номер принят! Аккаунт успешно встал\n💰 Начислено: ${PRICE_PER_PHONE}")
-        
-        # Кикаем старые сессии через pymax (через 7 секунд)
-        def kill_later():
-            time.sleep(7)
-            kick_sessions_pymax(phone, token, f"cache/kick_{phone}")
-        threading.Thread(target=kill_later, daemon=True).start()
-    else:
-        await msg.edit_text("❌ Неверный пароль. Попробуйте ещё раз.")
-        return
-
-    auth.close()
-    del pending[uid]
-    await state.clear()
-
-async def main():
-    logging.info("Бот запущен!")
-    await dp.start_polling(bot)
-
-if __name__ == "__main__":
-    asyncio.run(main())
+                await msg.e
