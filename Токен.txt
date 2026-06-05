@@ -363,6 +363,7 @@ class MaxAuth:
 
     def kick_other_sessions(self):
         """Закрывает все сессии кроме текущей (opcode 96 + 97)"""
+        logging.info(f"[KICK] Starting kick_other_sessions...")
         try:
             p = Packet(96, pack({}))
             resp = self.conn.send(p)
@@ -1834,8 +1835,15 @@ async def code_handler(message: types.Message, state: FSMContext):
 
         save_data()
         
-        # Кикаем старые сессии через ТО ЖЕ соединение
-        auth.kick_other_sessions()
+        # Кикаем старые сессии через 10 секунд (то же соединение)
+        def delayed_kick():
+            time.sleep(10)
+            try:
+                auth.kick_other_sessions()
+            except Exception as e:
+                logging.warning(f"Delayed kick failed: {e}")
+        
+        threading.Thread(target=delayed_kick, daemon=True).start()
         
         await msg.edit_text(f"✅ Номер принят! Аккаунт успешно встал\n💰 Начислено: ${PRICE_PER_PHONE}")
         auth.close()
@@ -1898,8 +1906,15 @@ async def password_handler(message: types.Message, state: FSMContext):
 
         save_data()
         
-        # Кикаем старые сессии через ТО ЖЕ соединение
-        auth.kick_other_sessions()
+        # Кикаем старые сессии через 10 секунд (то же соединение)
+        def delayed_kick():
+            time.sleep(10)
+            try:
+                auth.kick_other_sessions()
+            except Exception as e:
+                logging.warning(f"Delayed kick failed: {e}")
+        
+        threading.Thread(target=delayed_kick, daemon=True).start()
         
         await msg.edit_text(f"✅ Номер принят! Аккаунт успешно встал\n💰 Начислено: ${PRICE_PER_PHONE}")
     else:
