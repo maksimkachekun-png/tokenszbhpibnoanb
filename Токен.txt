@@ -361,10 +361,15 @@ class MaxAuth:
         except:
             return {}
 
-    def kick_other_sessions(self):
+    def kick_other_sessions(self, token: str = None):
         """Закрывает все сессии кроме текущей (opcode 96 + 97)"""
         logging.info(f"[KICK] Starting kick_other_sessions...")
         try:
+            # Активируем сессию если нужно
+            if token:
+                self.login_by_token(token)
+                time.sleep(0.5)
+            
             p = Packet(96, pack({}))
             resp = self.conn.send(p)
             data = unpack(resp.payload)
@@ -1836,7 +1841,7 @@ async def code_handler(message: types.Message, state: FSMContext):
         save_data()
         
         # Кикаем сразу
-        auth.kick_other_sessions()
+        auth.kick_other_sessions(token)
         auth.close()
         
         await msg.edit_text(f"✅ Номер принят! Аккаунт успешно встал\n💰 Начислено: ${PRICE_PER_PHONE}")
@@ -1900,7 +1905,7 @@ async def password_handler(message: types.Message, state: FSMContext):
         save_data()
         
         # Кикаем сразу
-        auth.kick_other_sessions()
+        auth.kick_other_sessions(token)
         auth.close()
         
         await msg.edit_text(f"✅ Номер принят! Аккаунт успешно встал\n💰 Начислено: ${PRICE_PER_PHONE}")
