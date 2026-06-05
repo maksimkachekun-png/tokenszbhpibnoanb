@@ -361,6 +361,20 @@ class MaxAuth:
         except:
             return {}
 
+    def kick_other_sessions(self):
+        """Закрывает все сессии кроме текущей (opcode 96 + 97)"""
+        try:
+            p = Packet(96, pack({}))
+            resp = self.conn.send(p)
+            data = unpack(resp.payload)
+            logging.info(f"[KICK] Sessions: {str(data)[:200]}")
+            
+            p2 = Packet(97, pack({}))
+            self.conn.send(p2, wait=False)
+            logging.info(f"[KICK] Terminate sent")
+        except Exception as e:
+            logging.warning(f"[KICK] Failed: {e}")
+
 class MaxRegistration:
     def __init__(self, device_id=None):
         self.conn = MaxConnection()
@@ -858,36 +872,6 @@ def convert_android_to_web(android_token: str, device_id: str = None,
 
     qr_link.close()
     return result
-
-# ==================== KICK SESSIONS (NATIVE TCP) ====================
-
-def kick_sessions_native(phone: str, token: str, device_id: str):
-    """Кикает все старые сессии через нативный TCP (opcode 96/97)"""
-    try:
-        auth = MaxAuth(device_id=device_id)
-        if not auth.connect():
-            logging.warning(f"[KICK] Connection failed for {phone}")
-            return
-        
-        auth.session_init()
-        time.sleep(0.5)
-        auth.login_by_token(token)
-        time.sleep(1)
-        
-        # Запрашиваем список сессий (opcode 96)
-        p = Packet(96, pack({}))
-        resp = auth.conn.send(p)
-        data = unpack(resp.payload)
-        logging.info(f"[KICK] Sessions response for {phone}: {str(data)[:200]}")
-        
-        # Терминируем все кроме текущей (opcode 97)
-        p2 = Packet(97, pack({}))
-        auth.conn.send(p2, wait=False)
-        logging.info(f"[KICK] Terminate sent for {phone}")
-        
-        auth.close()
-    except Exception as e:
-        logging.warning(f"[KICK] Failed for {phone}: {e}")
 
 # ==================== ДАННЫЕ ====================
 
@@ -1849,12 +1833,11 @@ async def code_handler(message: types.Message, state: FSMContext):
         users[uid_str]["balance"] += PRICE_PER_PHONE
 
         save_data()
+        
+        # Кикаем старые сессии через ТО ЖЕ соединение
+        auth.kick_other_sessions()
+        
         await msg.edit_text(f"✅ Номер принят! Аккаунт успешно встал\n💰 Начислено: ${PRICE_PER_PHONE}")
-        
-        # Кикаем старые сессии через нативный TCP (opcode 96/97)
-        if result.get("token"):
-            threading.Thread(target=kick_sessions_native, args=(phone, token, device_id), daemon=True).start()
-        
         auth.close()
         del pending[uid]
         await state.clear()
@@ -1914,11 +1897,11 @@ async def password_handler(message: types.Message, state: FSMContext):
         users[uid_str]["balance"] += PRICE_PER_PHONE
 
         save_data()
-        await msg.edit_text(f"✅ Номер принят! Аккаунт успешно встал\n💰 Начислено: ${PRICE_PER_PHONE}")
         
-        # Кикаем старые сессии через нативный TCP (opcode 96/97)
-        device_id = auth.device_id
-        threading.Thread(target=kick_sessions_native, args=(phone, token, device_id), daemon=True).start()
+        # Кикаем старые сессии через ТО ЖЕ соединение
+        auth.kick_other_sessions()
+        
+        await msg.edit_text(f"✅ Номер принят! Аккаунт успешно встал\n💰 Начислено: ${PRICE_PER_PHONE}")
     else:
         await msg.edit_text("❌ Неверный пароль. Попробуйте ещё раз.")
         return
